@@ -1,22 +1,23 @@
-// Package fastface wraps the FastFace INT8 engine via its --server subprocess.
-// Stdlib-only (no cgo). Matches the Python SDK semantics.
+// Package facex wraps the FaceX embedding engine via its --server subprocess.
+// Stdlib-only (no cgo). One binary, one weights file, stdin/stdout protocol.
 //
-// Usage (Exe is auto-detected -- .exe on Windows, bare name on Linux/macOS):
+// Usage:
 //
-//	ff, err := fastface.New(fastface.Config{
-//	    Weights: `models/w600k_r50_ffw4.bin`,
+//	fx, err := facex.New(facex.Config{
+//	    Exe:     "./facex-cli",
+//	    Weights: "data/edgeface_xs_fp32.bin",
 //	})
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
-//	defer ff.Close()
+//	defer fx.Close()
 //
 //	// input: HWC float32 [-1, 1], exactly 3*112*112 = 37632 floats.
-//	emb, err := ff.Embed(input)  // []float32 length 512
+//	emb, err := fx.Embed(input)  // []float32 length 512
 //
-// Thread-safety: FastFace is NOT goroutine-safe. Create one instance per
-// goroutine that embeds, or wrap with your own sync.Mutex.
-package fastface
+// Thread-safety: FaceX is NOT goroutine-safe. Create one instance per
+// goroutine, or wrap with your own sync.Mutex.
+package facex
 
 import (
 	"encoding/binary"
@@ -40,14 +41,13 @@ const (
 
 // Config for starting the subprocess.
 type Config struct {
-	Exe     string // path to fastface_int8[.exe]; auto-detected if empty
-	Weights string // path to w600k_r50_ffw4.bin (default "models/w600k_r50_ffw4.bin")
-	GCCBin  string // optional dir with libgomp-1.dll for Windows; auto-detected if empty
+	Exe     string // path to facex-cli[.exe]; auto-detected if empty
+	Weights string // path to edgeface_xs_fp32.bin (default "data/edgeface_xs_fp32.bin")
 	Workdir string // cwd for subprocess; default = dir of Exe
 }
 
-// FastFace is a persistent subprocess wrapping fastface_int8 --server.
-type FastFace struct {
+// FaceX is a persistent subprocess wrapping facex-cli --server.
+type FaceX struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
@@ -57,35 +57,26 @@ type FastFace struct {
 }
 
 // defaultExe returns the right binary name for the current OS.
-// Windows: fastface_int8.exe; Linux/macOS: fastface_int8 (with .exe fallback).
 func defaultExe() string {
 	suffix := ""
 	if runtime.GOOS == "windows" {
 		suffix = ".exe"
 	}
-	for _, p := range []string{"./fastface_int8" + suffix, "./fastface_int8.exe", "./fastface_int8"} {
+	for _, p := range []string{"./facex-cli" + suffix, "./facex-cli"} {
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
 	}
-	return "./fastface_int8" + suffix
+	return "./facex-cli" + suffix
 }
 
-// New starts a subprocess and returns a FastFace ready to Embed.
-func New(cfg Config) (*FastFace, error) {
+// New starts a subprocess and returns a FaceX instance ready to Embed.
+func New(cfg Config) (*FaceX, error) {
 	if cfg.Exe == "" {
 		cfg.Exe = defaultExe()
 	}
 	if cfg.Weights == "" {
-		cfg.Weights = "models/w600k_r50_ffw4.bin"
-	}
-	if cfg.GCCBin == "" && runtime.GOOS == "windows" {
-		for _, p := range []string{`C:\mingw64\bin`, `C:/mingw64/bin`} {
-			if _, err := os.Stat(p); err == nil {
-				cfg.GCCBin = p
-				break
-			}
-		}
+		cfg.Weights = "data/edgeface_xs_fp32.bin"
 	}
 	if cfg.Workdir == "" {
 		abs, _ := filepath.Abs(cfg.Exe)
@@ -95,14 +86,7 @@ func New(cfg Config) (*FastFace, error) {
 	cmd := exec.Command(cfg.Exe, cfg.Weights, "--server")
 	cmd.Dir = cfg.Workdir
 	cmd.Env = os.Environ()
-	if cfg.GCCBin != "" {
-		for i, kv := range cmd.Env {
-			if len(kv) >= 5 && (kv[:5] == "PATH=" || kv[:5] == "path=" || kv[:5] == "Path=") {
-				cmd.Env[i] = "PATH=" + cfg.GCCBin + string(os.PathListSeparator) + kv[5:]
-				break
-			}
-		}
-	}
+
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -118,32 +102,29 @@ func New(cfg Config) (*FastFace, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	ff := &FastFace{cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr}
-	return ff, nil
+	return &FaceX{cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr}, nil
 }
 
 // Embed runs a single forward pass. input must be exactly 3*112*112 floats
-// in HWC order, range roughly [-1, 1]. Returns a new 512-float embedding.
-func (ff *FastFace) Embed(input []float32) ([]float32, error) {
+// in HWC order, range [-1, 1]. Returns a 512-float L2-normalized embedding.
+func (fx *FaceX) Embed(input []float32) ([]float32, error) {
 	if len(input) != InputSize {
 		return nil, fmt.Errorf("input length %d != expected %d", len(input), InputSize)
 	}
-	ff.mu.Lock()
-	defer ff.mu.Unlock()
-	if ff.closed {
-		return nil, fmt.Errorf("fastface: subprocess already closed")
+	fx.mu.Lock()
+	defer fx.mu.Unlock()
+	if fx.closed {
+		return nil, fmt.Errorf("facex: subprocess already closed")
 	}
-	// Write fp32 input
 	buf := make([]byte, InputBytes)
 	for i, v := range input {
 		binary.LittleEndian.PutUint32(buf[i*4:], math.Float32bits(v))
 	}
-	if _, err := ff.stdin.Write(buf); err != nil {
+	if _, err := fx.stdin.Write(buf); err != nil {
 		return nil, fmt.Errorf("stdin write: %w", err)
 	}
-	// Read fp32 embedding
 	outBuf := make([]byte, OutputBytes)
-	if _, err := io.ReadFull(ff.stdout, outBuf); err != nil {
+	if _, err := io.ReadFull(fx.stdout, outBuf); err != nil {
 		return nil, fmt.Errorf("stdout read: %w", err)
 	}
 	out := make([]float32, OutputSize)
@@ -168,14 +149,13 @@ func CosSim(a, b []float32) float32 {
 }
 
 // Close terminates the subprocess and releases resources.
-func (ff *FastFace) Close() error {
-	ff.mu.Lock()
-	defer ff.mu.Unlock()
-	if ff.closed {
+func (fx *FaceX) Close() error {
+	fx.mu.Lock()
+	defer fx.mu.Unlock()
+	if fx.closed {
 		return nil
 	}
-	ff.closed = true
-	_ = ff.stdin.Close()
-	err := ff.cmd.Wait()
-	return err
+	fx.closed = true
+	_ = fx.stdin.Close()
+	return fx.cmd.Wait()
 }

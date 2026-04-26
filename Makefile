@@ -21,7 +21,7 @@ endif
 
 SRCS = src/facex.c src/transformer_ops.c src/gemm_int8_4x8c8.c src/threadpool.c
 
-.PHONY: all clean example lib cli encrypt
+.PHONY: all clean example lib cli encrypt test
 
 all: lib cli
 
@@ -56,5 +56,13 @@ encrypt: facex-encrypt$(EXT)
 facex-encrypt$(EXT): src/weight_crypto.c
 	$(CC) $(CFLAGS) -DWEIGHT_CRYPTO_MAIN -o $@ $< $(LDFLAGS)
 
+# Golden test
+test: golden-test$(EXT)
+	@echo "Running golden test..."
+	@./golden-test$(EXT) data/edgeface_xs_fp32.bin
+
+golden-test$(EXT): tests/golden_test.c libfacex.a
+	$(CC) $(CFLAGS) -Iinclude -o $@ $< -L. -lfacex $(LDFLAGS)
+
 clean:
-	rm -f libfacex.a facex-cli$(EXT) facex-example$(EXT) facex-encrypt$(EXT) *.o
+	rm -f libfacex.a facex-cli$(EXT) facex-example$(EXT) facex-encrypt$(EXT) golden-test$(EXT) *.o

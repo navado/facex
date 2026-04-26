@@ -679,7 +679,7 @@ static void edgeface_forward(const float* input_chw, /* [3, 112, 112] */
 {
     _g_weights = weights; /* enable INT8 lookup in matmul_wp */
     /* Static workspace — avoids malloc overhead on every call */
-    static float work[2 * 1024 * 1024]; /* 8MB — plenty for all stages */
+    static float work[2 * 1024 * 1024]; /* 8MB workspace */
     static float x_buf[28 * 28 * 192]; /* largest: 784 positions × 192 channels */
 
     float* x = x_buf;

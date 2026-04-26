@@ -628,7 +628,30 @@ void matmul_fp32_packed(const float* A, const float* B_packed, float* C,
             __m256 c10=_mm256_setzero_ps(), c11=_mm256_setzero_ps();
             __m256 c20=_mm256_setzero_ps(), c21=_mm256_setzero_ps();
             __m256 c30=_mm256_setzero_ps(), c31=_mm256_setzero_ps();
-            for (int k = 0; k < K; k++) {
+            { int k = 0;
+            for (; k + 2 <= K; k += 2) {
+                __m256 b0a = _mm256_load_ps(bp0 + k * NR);
+                __m256 b1a = _mm256_load_ps(bp1 + k * NR);
+                __m256 b0b = _mm256_load_ps(bp0 + (k+1) * NR);
+                __m256 b1b = _mm256_load_ps(bp1 + (k+1) * NR);
+                __m256 a0a = _mm256_broadcast_ss(&A[(m+0)*K+k]);
+                __m256 a1a = _mm256_broadcast_ss(&A[(m+1)*K+k]);
+                __m256 a2a = _mm256_broadcast_ss(&A[(m+2)*K+k]);
+                __m256 a3a = _mm256_broadcast_ss(&A[(m+3)*K+k]);
+                c00 = _mm256_fmadd_ps(a0a,b0a,c00); c01 = _mm256_fmadd_ps(a0a,b1a,c01);
+                c10 = _mm256_fmadd_ps(a1a,b0a,c10); c11 = _mm256_fmadd_ps(a1a,b1a,c11);
+                c20 = _mm256_fmadd_ps(a2a,b0a,c20); c21 = _mm256_fmadd_ps(a2a,b1a,c21);
+                c30 = _mm256_fmadd_ps(a3a,b0a,c30); c31 = _mm256_fmadd_ps(a3a,b1a,c31);
+                __m256 a0b = _mm256_broadcast_ss(&A[(m+0)*K+k+1]);
+                __m256 a1b = _mm256_broadcast_ss(&A[(m+1)*K+k+1]);
+                __m256 a2b = _mm256_broadcast_ss(&A[(m+2)*K+k+1]);
+                __m256 a3b = _mm256_broadcast_ss(&A[(m+3)*K+k+1]);
+                c00 = _mm256_fmadd_ps(a0b,b0b,c00); c01 = _mm256_fmadd_ps(a0b,b1b,c01);
+                c10 = _mm256_fmadd_ps(a1b,b0b,c10); c11 = _mm256_fmadd_ps(a1b,b1b,c11);
+                c20 = _mm256_fmadd_ps(a2b,b0b,c20); c21 = _mm256_fmadd_ps(a2b,b1b,c21);
+                c30 = _mm256_fmadd_ps(a3b,b0b,c30); c31 = _mm256_fmadd_ps(a3b,b1b,c31);
+            }
+            for (; k < K; k++) {
                 __m256 b0 = _mm256_load_ps(bp0 + k * NR);
                 __m256 b1 = _mm256_load_ps(bp1 + k * NR);
                 __m256 a0 = _mm256_broadcast_ss(&A[(m+0)*K+k]);
@@ -639,7 +662,7 @@ void matmul_fp32_packed(const float* A, const float* B_packed, float* C,
                 c10 = _mm256_fmadd_ps(a1,b0,c10); c11 = _mm256_fmadd_ps(a1,b1,c11);
                 c20 = _mm256_fmadd_ps(a2,b0,c20); c21 = _mm256_fmadd_ps(a2,b1,c21);
                 c30 = _mm256_fmadd_ps(a3,b0,c30); c31 = _mm256_fmadd_ps(a3,b1,c31);
-            }
+            } }
             if (n + 16 <= N) {
                 _mm256_storeu_ps(C+(m+0)*N+n,c00); _mm256_storeu_ps(C+(m+0)*N+n+8,c01);
                 _mm256_storeu_ps(C+(m+1)*N+n,c10); _mm256_storeu_ps(C+(m+1)*N+n+8,c11);
