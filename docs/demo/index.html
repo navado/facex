@@ -176,23 +176,33 @@ async function init() {
     return;
   }
   try {
-    s.textContent = 'Loading engines...'; s.className = 'status loading';
-    [DetMod, FxMod] = await Promise.all([FaceDetModule(), FaceXModule()]);
+    s.textContent = '1/5 Loading face detector (29 KB)...'; s.className = 'status loading';
+    DetMod = await FaceDetModule();
 
-    s.textContent = 'Loading weights (cached after first load)...';
-    const [dw, fw] = await Promise.all([
-      cachedFetch('det_500m_int8.bin', 'det'), cachedFetch('edgeface_xs_fp32.bin', 'emb')
-    ]);
+    s.textContent = '2/5 Loading face embedder (44 KB)...';
+    FxMod = await FaceXModule();
+
+    s.textContent = '3/5 Downloading detector weights (670 KB)...';
+    const dw = await cachedFetch('det_500m_int8.bin', 'det');
+
+    s.textContent = '4/5 Downloading embedding weights (7 MB, cached after first load)...';
+    const fw = await cachedFetch('edgeface_xs_fp32.bin', 'emb');
+
+    s.textContent = '5/5 Initializing engines...';
     DetMod.FS.writeFile('/d.bin', dw); FxMod.FS.writeFile('/e.bin', fw);
 
     detH = DetMod.cwrap('detect_init','number',['string'])('/d.bin');
-    fxH = FxMod.cwrap('facex_init','number',['string','string'])('/e.bin', null);
-    if (!detH || !fxH) throw new Error('Engine init failed');
+    if (!detH) throw new Error('Face detector init failed — weights may be corrupted');
 
-    s.textContent = 'Ready — 74 KB engines loaded'; s.className = 'status ready';
+    fxH = FxMod.cwrap('facex_init','number',['string','string'])('/e.bin', null);
+    if (!fxH) throw new Error('Face embedder init failed — weights may be corrupted');
+
+    s.textContent = 'Ready — engines loaded (detect 29KB + embed 44KB = 73KB WASM)'; s.className = 'status ready';
     $('btnStart').disabled = false;
     $('resultBar').textContent = 'Click "Start Camera" to begin';
-  } catch(e) { showError(e.message); }
+  } catch(e) {
+    showError('Load failed: ' + e.message + '. Try refreshing the page.');
+  }
 }
 
 function showError(msg) {
