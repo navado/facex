@@ -1,7 +1,7 @@
 /*
  * FaceX Detect — Tiny INT8 face detector.
  *
- * SCRFD-500M-KPS architecture, ~28 KB WASM engine, ~700 KB INT8 weights.
+ * YuNet architecture (53K params), ~28 KB WASM engine, ~52 KB INT8 weights.
  * Outputs bbox + 5 keypoints (ArcFace ordering) for downstream alignment.
  *
  * Usage:

@@ -177,7 +177,13 @@ def main():
         print(f"  {ident}: {len(decoded)} face(s) "
               f"{[round(f[4],3) for f in decoded]}")
 
-    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+    class NpEncoder(json.JSONEncoder):
+        def default(self, obj):
+            if isinstance(obj, np.integer): return int(obj)
+            if isinstance(obj, np.floating): return float(obj)
+            if isinstance(obj, np.ndarray): return obj.tolist()
+            return super().default(obj)
+    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, cls=NpEncoder))
     n_with = sum(1 for it in summary["items"] if it["n_faces"] >= 1)
     print()
     print(f"Done. {n_with}/{len(summary['items'])} images with at least 1 face.")
