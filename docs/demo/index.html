@@ -379,7 +379,7 @@ async function doCapture() {
   // WASM fallback — 96px only (160px too slow on mobile)
   $('resultBar').textContent = 'Detecting face...';
   setTimeout(() => {
-    const { faces, detMs } = runDetect(96);
+    const { faces, detMs } = runDetect(128);
     finishCapture(faces, detMs);
   }, 50);
 }
