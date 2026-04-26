@@ -2,60 +2,65 @@
   <img src="docs/logo.jpg" alt="FaceX" width="480">
 </p>
 
-<p align="center"><em>Fast face embedding library. 3 ms inference, 7 MB binary, zero dependencies.</em></p>
+<p align="center"><em>Face verification that runs entirely in the browser. Or on your server at 3ms. No cloud needed.</em></p>
 
 <p align="center">
 
-[![Language: C99](https://img.shields.io/badge/language-C99-blue.svg)](https://en.wikipedia.org/wiki/C99)
+[![Live Demo](https://img.shields.io/badge/demo-try_it_now-10b981.svg)](https://facex-engine.github.io/facex/demo/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
-[![Platform: x86-64](https://img.shields.io/badge/platform-x86__64-lightgrey.svg)](#limitations)
-[![AVX2 / AVX-512](https://img.shields.io/badge/SIMD-AVX2_%2F_AVX--512-blueviolet.svg)](#architecture)
 [![LFW](https://img.shields.io/badge/LFW-99.73%25-success.svg)](#benchmarks)
-[![Latency](https://img.shields.io/badge/latency-3.0_ms%2Fface-brightgreen.svg)](#benchmarks)
-[![Binary](https://img.shields.io/badge/binary-148_KB-informational.svg)](#footprint)
+[![Latency](https://img.shields.io/badge/latency-3.0_ms-brightgreen.svg)](#benchmarks)
+[![WASM](https://img.shields.io/badge/WASM-74_KB-blueviolet.svg)](#browser)
 [![Deps](https://img.shields.io/badge/dependencies-zero-green.svg)](#architecture)
 
 </p>
 
-**A 148 KB face embedding library that runs EdgeFace-XS at 3.0 ms/face
-on a consumer i5 -- faster than ONNX Runtime on the same model and CPU.**
+**Add face recognition to any app in minutes.** Runs in the browser (74 KB WebAssembly) or on your server (3ms native C). Detects faces, aligns them, computes embeddings, compares. No server required for browser mode — photos never leave the user's device.
 
-No Python. No GPU. No ONNX Runtime. One header, one static library.
+**[Try the live demo →](https://facex-engine.github.io/facex/demo/)**
+
+```html
+<!-- Browser: face verification in 3 lines -->
+<script src="facex-sdk.js"></script>
+<script>
+  const fx = new FaceXSDK();
+  await fx.load();
+  const result = fx.verify(videoElement, referenceEmbedding);
+  // { match: true, similarity: 0.87, ms: 17 }
+</script>
+```
 
 ```c
+// Native C: 3ms per face
 #include "facex.h"
-
-FaceX* fx = facex_init("edgeface_xs_fp32.bin", NULL);
+FaceX* fx = facex_init("weights.bin", NULL);
 float emb[512];
-facex_embed(fx, rgb_112x112, emb);
+facex_embed(fx, face_112x112, emb);
+float sim = facex_similarity(emb1, emb2);
 ```
 
 ---
 
-## Why this exists
+## What can you build with this?
 
-Face embedding is the core of every face recognition system -- turning
-a face photo into a 512-dimensional vector. The standard way to run it
-on CPU is ONNX Runtime (28 MB DLL + Python). That's fine for servers,
-but too heavy for edge devices, kiosks, embedded systems, and anyone
-who values simplicity.
+- **Identity verification** — "is this the same person?" from selfie + ID photo
+- **Face login** — unlock apps by face, works offline, no data leaves the device
+- **Access control** — doors, gates, turnstiles on edge hardware without GPU
+- **Proctoring** — verify exam takers are who they claim to be
+- **Smart cameras** — recognize known faces at 300+ faces/sec on a single CPU core
 
-FaceX is a single C99 file with handwritten AVX2/AVX-512 SIMD kernels
-that **beats ONNX Runtime by 23%** with zero dependencies. Six months
-of optimization: per-op profiling, custom GEMM microkernels, INT8
-quantization, cache-tuned memory layout, thread pool -- every
-millisecond fought for.
+## How it works
 
-### Target users
+FaceX detects faces, aligns them using 5 landmarks, and computes a 512-dim
+embedding. Compare two embeddings — above 0.3 similarity = same person.
+99.73% accuracy on the LFW benchmark.
 
-- **Edge AI / embedded** -- kiosks, turnstiles, access control where
-  you have a $40 CPU and no GPU.
-- **Server-side at scale** -- 3 ms/face means 300+ faces/sec on a
-  single core.
-- **Privacy-first deployments** -- runs fully offline, no cloud,
-  no telemetry.
-- **Developers** -- `#include "facex.h"`, link, done. No package
-  managers, no version conflicts.
+Two modes:
+- **Browser:** 74 KB WebAssembly, 17ms pipeline, no server needed
+- **Native:** 148 KB C library, 3ms per face, faster than ONNX Runtime
+
+Six months of optimization: handwritten AVX2/AVX-512 SIMD kernels, INT8
+GEMM, cache-tuned layout — every millisecond fought for.
 
 ---
 
