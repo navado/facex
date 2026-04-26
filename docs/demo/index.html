@@ -383,19 +383,11 @@ async function doCapture() {
     finishCapture(faces, detMs);
     return;
   }
-  // WASM fallback
-  $('resultBar').textContent = 'Detecting face (96px)...';
+  // WASM fallback — 96px only (160px too slow on mobile)
+  $('resultBar').textContent = 'Detecting face...';
   setTimeout(() => {
-    let { faces, detMs } = runDetect(96);
-    if (faces.length) {
-      finishCapture(faces, detMs);
-    } else {
-      $('resultBar').textContent = 'Not found. Retrying at 160px...';
-      setTimeout(() => {
-        const r2 = runDetect(160);
-        finishCapture(r2.faces, detMs + r2.detMs);
-      }, 50);
-    }
+    const { faces, detMs } = runDetect(96);
+    finishCapture(faces, detMs);
   }, 50);
 }
 function finishCapture(faces, detMs) {
