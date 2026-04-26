@@ -6,3 +6,10 @@
 *.dll
 *.so
 *.dylib
+
+# Local toolchains and datasets — NOT committed
+emsdk/
+lfw/
+lfw.tgz
+node_modules/
+weights/golden/

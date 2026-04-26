@@ -21,9 +21,9 @@ endif
 
 SRCS = src/facex.c src/transformer_ops.c src/gemm_int8_4x8c8.c src/threadpool.c
 
-.PHONY: all clean example lib cli encrypt test
+.PHONY: all clean example lib cli encrypt test detect-lib
 
-all: lib cli
+all: lib cli detect-lib
 
 # Static library
 lib: libfacex.a
@@ -64,5 +64,15 @@ test: golden-test$(EXT)
 golden-test$(EXT): tests/golden_test.c libfacex.a
 	$(CC) $(CFLAGS) -Iinclude -o $@ $< -L. -lfacex $(LDFLAGS)
 
+# Detector static library (Sprint 1+: scaffold only, real engine arrives in
+# later sprints — see docs/plan/detector_plan.md).
+detect-lib: libdetect.a
+
+libdetect.a: src/detect.c include/detect.h
+	$(CC) $(CFLAGS) -Iinclude -c src/detect.c -o detect.o
+	ar rcs $@ detect.o
+	@rm -f detect.o
+	@echo "Built libdetect.a"
+
 clean:
-	rm -f libfacex.a facex-cli$(EXT) facex-example$(EXT) facex-encrypt$(EXT) golden-test$(EXT) *.o
+	rm -f libfacex.a libdetect.a facex-cli$(EXT) facex-example$(EXT) facex-encrypt$(EXT) golden-test$(EXT) *.o
