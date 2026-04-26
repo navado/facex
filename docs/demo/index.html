@@ -213,10 +213,36 @@ function showError(msg) {
 // ===== Camera =====
 $('btnStart').onclick = async () => {
   try {
+    $('btnStart').textContent = 'Starting camera...';
+    $('btnStart').disabled = true;
     const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240, facingMode: 'user' }});
     video.srcObject = stream;
-    video.onloadedmetadata = () => { overlay.width = video.videoWidth; overlay.height = video.videoHeight; };
-    $('btnStart').disabled = true; $('btnStart').style.display = 'none';
+    // Wait for video to actually start playing with real frames
+    await new Promise((resolve) => {
+      video.onloadedmetadata = () => {
+        overlay.width = video.videoWidth;
+        overlay.height = video.videoHeight;
+        video.play().then(resolve).catch(resolve);
+      };
+    });
+    // Wait for first real frame (not black)
+    await new Promise((resolve) => {
+      const check = () => {
+        if (video.readyState >= 2 && video.videoWidth > 0) {
+          // Draw a test pixel to verify non-black
+          const tc = document.createElement('canvas');
+          tc.width = 4; tc.height = 4;
+          const tctx = tc.getContext('2d');
+          tctx.drawImage(video, 0, 0, 4, 4);
+          const px = tctx.getImageData(0, 0, 4, 4).data;
+          const sum = px[0] + px[1] + px[2] + px[4] + px[5] + px[6];
+          if (sum > 10) { resolve(); return; } // non-black frame
+        }
+        requestAnimationFrame(check);
+      };
+      check();
+    });
+    $('btnStart').style.display = 'none';
     $('btnCapture').disabled = false;
     $('resultBar').textContent = 'Look at camera and click "Set Reference"';
   } catch(e) { showError('Camera access denied: ' + e.message); }
