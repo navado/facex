@@ -139,9 +139,9 @@ const cropCtxA = cropCv.getContext('2d', { willReadFrequently: true });
 
 // ===== SIMD Check =====
 function checkSimd() {
-  try {
-    return WebAssembly.validate(new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,123,3,2,1,0,10,10,1,8,0,253,12,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,11]));
-  } catch(e) { return false; }
+  // Skip check — let WASM loading fail naturally with a better error.
+  // iPhone 16 Pro + Safari supports SIMD but some check modules give false negatives.
+  return typeof WebAssembly !== 'undefined';
 }
 
 // ===== IndexedDB Cache =====
@@ -181,7 +181,7 @@ async function init() {
 
     s.textContent = 'Loading weights (cached after first load)...';
     const [dw, fw] = await Promise.all([
-      cachedFetch('https://github.com/facex-engine/facex/releases/download/v1.0.0/det_500m_int8.bin', 'det'), cachedFetch('https://github.com/facex-engine/facex/releases/download/v1.0.0/edgeface_xs_fp32.bin', 'emb')
+      cachedFetch('det_500m_int8.bin', 'det'), cachedFetch('https://github.com/facex-engine/facex/releases/download/v1.0.0/edgeface_xs_fp32.bin', 'emb')
     ]);
     DetMod.FS.writeFile('/d.bin', dw); FxMod.FS.writeFile('/e.bin', fw);
 
