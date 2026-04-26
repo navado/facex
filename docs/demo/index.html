@@ -225,19 +225,12 @@ $('btnStart').onclick = async () => {
         video.play().then(resolve).catch(resolve);
       };
     });
-    // Wait for first real frame (not black)
+    // Wait for video to be ready (with 3s timeout)
     await new Promise((resolve) => {
+      const start = Date.now();
       const check = () => {
-        if (video.readyState >= 2 && video.videoWidth > 0) {
-          // Draw a test pixel to verify non-black
-          const tc = document.createElement('canvas');
-          tc.width = 4; tc.height = 4;
-          const tctx = tc.getContext('2d');
-          tctx.drawImage(video, 0, 0, 4, 4);
-          const px = tctx.getImageData(0, 0, 4, 4).data;
-          const sum = px[0] + px[1] + px[2] + px[4] + px[5] + px[6];
-          if (sum > 10) { resolve(); return; } // non-black frame
-        }
+        if (Date.now() - start > 3000) { resolve(); return; }
+        if (video.readyState >= 2 && video.videoWidth > 0) { resolve(); return; }
         requestAnimationFrame(check);
       };
       check();
