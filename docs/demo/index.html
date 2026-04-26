@@ -49,6 +49,10 @@ canvas.hidden { display: none; }
   <button id="bTest" class="gray" disabled>Self-test</button>
 </div>
 
+<div style="display:flex;gap:8px;justify-content:center;margin-bottom:8px">
+  <div style="text-align:center"><canvas id="refVis" width="112" height="112" style="width:80px;height:80px;border-radius:6px;border:1px solid #333;background:#111"></canvas><div style="font-size:10px;color:#666">Reference</div></div>
+  <div style="text-align:center"><canvas id="curVis" width="112" height="112" style="width:80px;height:80px;border-radius:6px;border:1px solid #333;background:#111"></canvas><div style="font-size:10px;color:#666">Current</div></div>
+</div>
 <div id="result" class="idle"></div>
 <div class="stats" id="stats" style="display:none">
   <span id="sEmb">—</span>

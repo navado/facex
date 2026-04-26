@@ -1,0 +1,36 @@
+{
+  "name": "facex-web",
+  "version": "1.0.0",
+  "description": "Face recognition in the browser. 74 KB WASM. No server, no dependencies.",
+  "main": "facex-sdk.js",
+  "types": "facex-sdk.d.ts",
+  "files": [
+    "facex-sdk.js",
+    "facex-sdk.d.ts",
+    "align.js",
+    "detect.js",
+    "detect.wasm",
+    "facex.js",
+    "facex.wasm"
+  ],
+  "keywords": [
+    "face-recognition",
+    "face-detection",
+    "face-embedding",
+    "webassembly",
+    "wasm",
+    "simd",
+    "browser",
+    "privacy",
+    "zero-dependencies",
+    "offline"
+  ],
+  "author": "Baurzhan Atinov",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/facex-engine/facex",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/facex-engine/facex.git",
+    "directory": "wasm"
+  }
+}
