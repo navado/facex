@@ -248,7 +248,41 @@ $('btnStart').onclick = async () => {
   } catch(e) { showError('Camera access denied: ' + e.message); }
 };
 
-// ===== Detect =====
+// ===== Detect: use native FaceDetector API if available (fast on mobile) =====
+let useNativeDetector = false;
+let nativeDetector = null;
+try {
+  if (typeof FaceDetector !== 'undefined') {
+    nativeDetector = new FaceDetector({ maxDetectedFaces: 5, fastMode: true });
+    useNativeDetector = true;
+  }
+} catch(e) {}
+
+async function runDetectNative() {
+  const W = video.videoWidth, H = video.videoHeight;
+  const t0 = performance.now();
+  const detected = await nativeDetector.detect(video);
+  const detMs = performance.now() - t0;
+  const faces = detected.map(d => {
+    const b = d.boundingBox;
+    // Native API gives landmarks in different order, approximate 5-point
+    const cx = b.x + b.width/2, cy = b.y + b.height/2;
+    const ew = b.width * 0.3, eh = b.height * 0.15;
+    return {
+      x1: b.x, y1: b.y, x2: b.x + b.width, y2: b.y + b.height,
+      score: 1.0,
+      kps: [
+        cx - ew, cy - eh,  // left eye
+        cx + ew, cy - eh,  // right eye
+        cx, cy + eh*0.5,   // nose
+        cx - ew*0.7, cy + b.height*0.3,  // left mouth
+        cx + ew*0.7, cy + b.height*0.3   // right mouth
+      ]
+    };
+  });
+  return { faces, detMs };
+}
+
 function runDetect(size) {
   const W = video.videoWidth, H = video.videoHeight;
   const ds = size || 160;
@@ -341,14 +375,22 @@ $('btnCapture').onclick = () => {
   // Defer to let UI update before heavy WASM call
   setTimeout(() => { doCapture(); }, 50);
 };
-function doCapture() {
+async function doCapture() {
+  if (useNativeDetector) {
+    // Native FaceDetector API — instant on mobile
+    $('resultBar').textContent = 'Detecting face (native)...';
+    const { faces, detMs } = await runDetectNative();
+    finishCapture(faces, detMs);
+    return;
+  }
+  // WASM fallback
   $('resultBar').textContent = 'Detecting face (96px)...';
   setTimeout(() => {
     let { faces, detMs } = runDetect(96);
     if (faces.length) {
       finishCapture(faces, detMs);
     } else {
-      $('resultBar').textContent = 'Not found. Retrying at 160px (may take a few seconds)...';
+      $('resultBar').textContent = 'Not found. Retrying at 160px...';
       setTimeout(() => {
         const r2 = runDetect(160);
         finishCapture(r2.faces, detMs + r2.detMs);
@@ -395,10 +437,10 @@ $('btnStop').onclick = () => {
   $('videoWrap').className = 'video-wrap';
 };
 
-function loop() {
+async function loop() {
   if (!running) return;
   const tAll = performance.now();
-  const { faces, detMs } = runDetect();
+  const { faces, detMs } = useNativeDetector ? await runDetectNative() : runDetect(96);
 
   if (!faces.length) {
     drawFaces([]);
