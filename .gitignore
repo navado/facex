@@ -13,3 +13,6 @@ lfw/
 lfw.tgz
 node_modules/
 weights/golden/
+*.npz
+gmon.out
+__pycache__/
