@@ -376,10 +376,27 @@ async function doCapture() {
     finishCapture(faces, detMs);
     return;
   }
-  // WASM fallback — 96px only (160px too slow on mobile)
+  // Mobile fallback: center crop (WASM detector too heavy for mobile)
+  const isMobile = /iPhone|iPad|Android/i.test(navigator.userAgent);
+  if (isMobile) {
+    $('resultBar').textContent = 'Capturing face (center crop)...';
+    setTimeout(() => {
+      const W = video.videoWidth, H = video.videoHeight;
+      const sz = Math.min(W, H) * 0.7;
+      const cx = W/2, cy = H/2;
+      const face = {
+        x1: cx-sz/2, y1: cy-sz/2, x2: cx+sz/2, y2: cy+sz/2, score: 1.0,
+        kps: [cx-sz*0.15, cy-sz*0.1, cx+sz*0.15, cy-sz*0.1, cx, cy+sz*0.05,
+              cx-sz*0.12, cy+sz*0.2, cx+sz*0.12, cy+sz*0.2]
+      };
+      finishCapture([face], 0);
+    }, 50);
+    return;
+  }
+  // Desktop: WASM detector
   $('resultBar').textContent = 'Detecting face...';
   setTimeout(() => {
-    const { faces, detMs } = runDetect(128);
+    const { faces, detMs } = runDetect(160);
     finishCapture(faces, detMs);
   }, 50);
 }
@@ -425,7 +442,19 @@ $('btnStop').onclick = () => {
 async function loop() {
   if (!running) return;
   const tAll = performance.now();
-  const { faces, detMs } = useNativeDetector ? await runDetectNative() : runDetect(96);
+  const isMobile = /iPhone|iPad|Android/i.test(navigator.userAgent);
+  let faces, detMs;
+  if (useNativeDetector) {
+    ({ faces, detMs } = await runDetectNative());
+  } else if (isMobile) {
+    const W = video.videoWidth, H = video.videoHeight;
+    const sz = Math.min(W, H) * 0.7, cx = W/2, cy = H/2;
+    faces = [{ x1:cx-sz/2, y1:cy-sz/2, x2:cx+sz/2, y2:cy+sz/2, score:1,
+      kps:[cx-sz*.15,cy-sz*.1, cx+sz*.15,cy-sz*.1, cx,cy+sz*.05, cx-sz*.12,cy+sz*.2, cx+sz*.12,cy+sz*.2] }];
+    detMs = 0;
+  } else {
+    ({ faces, detMs } = runDetect(160));
+  }
 
   if (!faces.length) {
     drawFaces([]);
