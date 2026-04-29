@@ -19,7 +19,7 @@ int main(int argc, char** argv) {
     printf("FaceX Golden Test\n");
     printf("Loading: %s\n", weights);
 
-    FaceX* fx = facex_init(weights, NULL);
+    FaceX* fx = facex_init(weights, NULL, NULL);
     if (!fx) {
         fprintf(stderr, "FAIL: cannot load weights\n");
         return 1;

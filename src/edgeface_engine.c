@@ -535,12 +535,17 @@ static void matmul_auto(const float* A, int M, int K, int N,
 /* Use matmul that checks for pre-packed FP32 or INT8 weights */
 extern void matmul_fp32_packed(const float*, const float*, float*, int, int, int);
 
+extern void matmul_dynamic_int8(const float*, int, int, int,
+                                const void*, const int32_t*, const float*, float*);
+
 static void matmul_w(const float* A, const float* B, float* C,
                      int M, int K, int N, const PackedMM* mm)
 {
-    (void)mm; /* INT8 disabled for now */
-    /* Check for FP32 packed weight — stored in the global weights struct */
-    /* We pass B as the ORIGINAL weight pointer; the caller checks fp[] */
+    /* Use INT8 when pre-packed weights available (2× faster) */
+    if (mm && mm->packed && mm->w_scales && N >= 8) {
+        matmul_dynamic_int8(A, M, K, N, mm->packed, mm->col_sums, mm->w_scales, C);
+        return;
+    }
     matmul_fp32(A, B, C, M, K, N);
 }
 
@@ -553,10 +558,24 @@ extern void matmul_jit_or_packed(const float*, const float*, float*, int, int, i
 
 static Weights* _g_weights = NULL; /* set in forward pass for INT8 lookup */
 
-/* Zero-overhead matmul: inline, direct call, no dispatch */
+/* Zero-overhead matmul: INT8 when available, FP32 fallback */
 static inline void matmul_wp(const float* A, float* C,
                              int M, int K, int N, const PackedFP32* fp)
 {
+    /* Use INT8 VNNI for large matmuls where VNNI throughput > quant overhead.
+     * For small K*N (<4096), FP32 packed is faster due to zero quant overhead. */
+    if (_g_weights && _g_weights->mm) {
+        int idx = (int)(fp - _g_weights->fp);
+        if (idx >= 0 && idx < _g_weights->n_tensors) {
+            PackedMM* mm = &_g_weights->mm[idx];
+            if (mm->packed && mm->w_scales && mm->N >= 8 && (int64_t)mm->K * mm->N >= 4096) {
+                extern void matmul_dynamic_int8(const float*, int, int, int,
+                    const void*, const int32_t*, const float*, float*);
+                matmul_dynamic_int8(A, M, mm->K, mm->N, mm->packed, mm->col_sums, mm->w_scales, C);
+                return;
+            }
+        }
+    }
     matmul_fp32_packed(A, fp->data, C, M, fp->K, fp->N);
 }
 static void matmul_wpb(const float* A, float* C, const float* bias,
@@ -688,34 +707,52 @@ static void edgeface_forward(const float* input_chw, /* [3, 112, 112] */
     {
         const float* sw = W(0); /* [32, 3, 4, 4] OIHW */
         const float* sb = W(1); /* [32] */
+
+        /* Pre-rearrange weights from [co, ci, ky, kx] to [ci, ky, kx, co] (contiguous per co).
+         * This converts strided gather (stride=48) to contiguous load (1 AVX2 op). */
+        static float sw_rearr[3 * 4 * 4 * 32]; /* 6KB — fits in L1 */
+        static int sw_done = 0;
+        if (!sw_done) {
+            for (int ci = 0; ci < 3; ci++)
+                for (int ky = 0; ky < 4; ky++)
+                    for (int kx = 0; kx < 4; kx++)
+                        for (int co = 0; co < 32; co++)
+                            sw_rearr[((ci*16 + ky*4 + kx)*32) + co] = sw[(co*3+ci)*16 + ky*4+kx];
+            sw_done = 1;
+        }
+
         for (int oy = 0; oy < 28; oy++)
             for (int ox = 0; ox < 28; ox++) {
                 float* o = x + (oy * 28 + ox) * 32;
                 int co = 0;
-#ifdef __AVX2__
+#ifdef __AVX512F__
+                for (; co + 16 <= 32; co += 16)
+                    _mm512_storeu_ps(o + co, _mm512_loadu_ps(sb + co));
+#elif defined(__AVX2__)
                 for (; co + 8 <= 32; co += 8)
                     _mm256_storeu_ps(o + co, _mm256_loadu_ps(sb + co));
 #endif
                 for (; co < 32; co++) o[co] = sb[co];
+
                 for (int ci = 0; ci < 3; ci++)
                     for (int ky = 0; ky < 4; ky++)
                         for (int kx = 0; kx < 4; kx++) {
                             float iv = input_chw[(size_t)ci*112*112 + (oy*4+ky)*112 + ox*4+kx];
+                            const float* wrow = sw_rearr + (ci*16 + ky*4 + kx) * 32;
                             co = 0;
-#ifdef __AVX2__
+#ifdef __AVX512F__
+                            __m512 va16 = _mm512_set1_ps(iv);
+                            for (; co + 16 <= 32; co += 16)
+                                _mm512_storeu_ps(o+co, _mm512_fmadd_ps(va16, _mm512_loadu_ps(wrow+co),
+                                    _mm512_loadu_ps(o+co)));
+#elif defined(__AVX2__)
                             __m256 va = _mm256_set1_ps(iv);
-                            for (; co + 8 <= 32; co += 8) {
-                                int wi = (co * 3 + ci) * 16 + ky * 4 + kx;
-                                /* Gather weights: w[co+j, ci, ky, kx] for j=0..7 */
-                                float wv[8];
-                                for (int j = 0; j < 8; j++)
-                                    wv[j] = sw[((co+j)*3+ci)*16 + ky*4+kx];
-                                _mm256_storeu_ps(o+co, _mm256_fmadd_ps(va, _mm256_loadu_ps(wv),
+                            for (; co + 8 <= 32; co += 8)
+                                _mm256_storeu_ps(o+co, _mm256_fmadd_ps(va, _mm256_loadu_ps(wrow+co),
                                     _mm256_loadu_ps(o+co)));
-                            }
 #endif
                             for (; co < 32; co++)
-                                o[co] += iv * sw[(co*3+ci)*16 + ky*4+kx];
+                                o[co] += iv * wrow[co];
                         }
             }
     }

@@ -140,19 +140,12 @@ static void gemm_4x8c8_ukernel(
     const int8_t* a, int a_stride,
     const int8_t* w,
     int32_t* c, int c_stride,
-    int K, int mr)
+    int K, int mr,
+    const int32_t* col_sums_8)   /* 8 col_sums for VNNI compensation, or NULL */
 {
 #ifdef __AVX512VNNI__
-    /* AVX-512 VNNI path: MR=4, NR=16 (process all 8 cols + padding in one ZMM).
-     * VPDPBUSD(acc, a_u8, b_s8): acc += sum_of_4(a_u8[i]*b_s8[i]) per 32-bit lane.
-     * Each ZMM holds 64 bytes = 16 groups of 4 bytes. With c8 layout, one ZMM = 2 cols × 8 k-values.
-     * So we need 4 ZMM loads for 8 cols. */
-
-    /* Actually, simpler: use the same c8 layout but process with 512-bit registers.
-     * Load 64 bytes (8 cols × 8 k-values) into one ZMM. VPDPBUSD processes 4 bytes per lane.
-     * ZMM has 16 lanes of 32 bits = 16 groups of 4 bytes.
-     * With broadcastq A (8 bytes broadcast to all 8 qwords), each VPDPBUSD processes
-     * 4 k-values per lane, 16 lanes = 4 cols (lo) + 4 cols (hi) with proper layout. */
+    /* AVX-512 VNNI: VPDPBUSD (u8×s8→s32, no saturation).
+     * Uses XOR trick: A_u8 = A_s8 ^ 0x80. Compensated via col_sums. */ {
 
     __m512i vacc0 = _mm512_setzero_si512();
     __m512i vacc1 = _mm512_setzero_si512();
@@ -172,127 +165,120 @@ static void gemm_4x8c8_ukernel(
         memcpy(&a2_val, a2, 8); memcpy(&a3_val, a3, 8);
         a0_val ^= xor_mask; a1_val ^= xor_mask;
         a2_val ^= xor_mask; a3_val ^= xor_mask;
-        /* Broadcast 8 A bytes to 64 bytes (ZMM) */
+
         const __m512i va0 = _mm512_set1_epi64(a0_val);
         const __m512i va1 = _mm512_set1_epi64(a1_val);
         const __m512i va2 = _mm512_set1_epi64(a2_val);
         const __m512i va3 = _mm512_set1_epi64(a3_val);
         a0 += 8; a1 += 8; a2 += 8; a3 += 8;
 
-        /* Load all 64 bytes of B (8 cols × 8 k-values) in one ZMM */
         const __m512i vb = _mm512_loadu_si512((const __m512i*)w);
         w += 64;
 
-        /* VPDPBUSD: acc += sum_4(u8[i]*s8[i]) per 32-bit lane.
-         * No s16 saturation — full ±127 range! */
         vacc0 = _mm512_dpbusd_epi32(vacc0, va0, vb);
         vacc1 = _mm512_dpbusd_epi32(vacc1, va1, vb);
         vacc2 = _mm512_dpbusd_epi32(vacc2, va2, vb);
         vacc3 = _mm512_dpbusd_epi32(vacc3, va3, vb);
     }
 
-    /* Reduce: each vacc has 16 × s32 lanes.
-     * With c8 layout [col0_k0..k7, col1_k0..k7, ...], each group of 2 s32 lanes
-     * = partial sums for one column (8 k-values / 4 per lane = 2 lanes per col).
-     * Need to add adjacent pairs to get one s32 per column. */
-    /* hadd pairs: lane[0]+lane[1]=col0, lane[2]+lane[3]=col1, ... */
-    /* Use _mm512_reduce or manual hadd */
-    {
-        /* Extract to 2 YMM halves, hadd, then extract 8 results */
-        __m256i lo0 = _mm512_castsi512_si256(vacc0);
-        __m256i hi0 = _mm512_extracti64x4_epi64(vacc0, 1);
-        __m256i lo1 = _mm512_castsi512_si256(vacc1);
-        __m256i hi1 = _mm512_extracti64x4_epi64(vacc1, 1);
-        __m256i lo2 = _mm512_castsi512_si256(vacc2);
-        __m256i hi2 = _mm512_extracti64x4_epi64(vacc2, 1);
-        __m256i lo3 = _mm512_castsi512_si256(vacc3);
-        __m256i hi3 = _mm512_extracti64x4_epi64(vacc3, 1);
+    /* Reduce 16 lanes → 8 columns via hadd+permute */
+    __m256i lo0 = _mm512_castsi512_si256(vacc0), hi0 = _mm512_extracti64x4_epi64(vacc0, 1);
+    __m256i lo1 = _mm512_castsi512_si256(vacc1), hi1 = _mm512_extracti64x4_epi64(vacc1, 1);
+    __m256i lo2 = _mm512_castsi512_si256(vacc2), hi2 = _mm512_extracti64x4_epi64(vacc2, 1);
+    __m256i lo3 = _mm512_castsi512_si256(vacc3), hi3 = _mm512_extracti64x4_epi64(vacc3, 1);
 
-        /* hadd pairs within each 256-bit half, then combine */
-        __m256i vout0 = _mm256_permute4x64_epi64(
-            _mm256_hadd_epi32(lo0, hi0), 0xD8);
-        __m256i vout1 = _mm256_permute4x64_epi64(
-            _mm256_hadd_epi32(lo1, hi1), 0xD8);
-        __m256i vout2 = _mm256_permute4x64_epi64(
-            _mm256_hadd_epi32(lo2, hi2), 0xD8);
-        __m256i vout3 = _mm256_permute4x64_epi64(
-            _mm256_hadd_epi32(lo3, hi3), 0xD8);
+    __m256i vout0 = _mm256_permute4x64_epi64(_mm256_hadd_epi32(lo0, hi0), 0xD8);
+    __m256i vout1 = _mm256_permute4x64_epi64(_mm256_hadd_epi32(lo1, hi1), 0xD8);
+    __m256i vout2 = _mm256_permute4x64_epi64(_mm256_hadd_epi32(lo2, hi2), 0xD8);
+    __m256i vout3 = _mm256_permute4x64_epi64(_mm256_hadd_epi32(lo3, hi3), 0xD8);
 
-        _mm256_storeu_si256((__m256i*)(c), vout0);
-        if (mr > 1) _mm256_storeu_si256((__m256i*)(c + c_stride), vout1);
-        if (mr > 2) _mm256_storeu_si256((__m256i*)(c + 2 * c_stride), vout2);
-        if (mr > 3) _mm256_storeu_si256((__m256i*)(c + 3 * c_stride), vout3);
+    /* Subtract col_sums compensation (XOR trick offset) */
+    if (col_sums_8) {
+        __m256i vcomp = _mm256_loadu_si256((const __m256i*)col_sums_8);
+        vout0 = _mm256_sub_epi32(vout0, vcomp);
+        vout1 = _mm256_sub_epi32(vout1, vcomp);
+        vout2 = _mm256_sub_epi32(vout2, vcomp);
+        vout3 = _mm256_sub_epi32(vout3, vcomp);
     }
-    return;
-#endif
-
-    /* AVX2 fallback */ {
-    const __m256i vones = _mm256_set1_epi16(1);
-    __m256i vacc0_lo = _mm256_setzero_si256();
-    __m256i vacc0_hi = _mm256_setzero_si256();
-    __m256i vacc1_lo = _mm256_setzero_si256();
-    __m256i vacc1_hi = _mm256_setzero_si256();
-    __m256i vacc2_lo = _mm256_setzero_si256();
-    __m256i vacc2_hi = _mm256_setzero_si256();
-    __m256i vacc3_lo = _mm256_setzero_si256();
-    __m256i vacc3_hi = _mm256_setzero_si256();
-
-    const int8_t* a0 = a;
-    const int8_t* a1 = (mr > 1) ? a0 + a_stride : a0;
-    const int8_t* a2 = (mr > 2) ? a1 + a_stride : a1;
-    const int8_t* a3 = (mr > 3) ? a2 + a_stride : a2;
-
-    const int64_t xor_mask = (int64_t)0x8080808080808080ULL;
-
-    for (int k = 0; k < K; k += 8) {
-        int64_t a0_val, a1_val, a2_val, a3_val;
-        memcpy(&a0_val, a0, 8); memcpy(&a1_val, a1, 8);
-        memcpy(&a2_val, a2, 8); memcpy(&a3_val, a3, 8);
-        a0_val ^= xor_mask; a1_val ^= xor_mask;
-        a2_val ^= xor_mask; a3_val ^= xor_mask;
-        const __m256i va0 = _mm256_set1_epi64x(a0_val);
-        const __m256i va1 = _mm256_set1_epi64x(a1_val);
-        const __m256i va2 = _mm256_set1_epi64x(a2_val);
-        const __m256i va3 = _mm256_set1_epi64x(a3_val);
-        a0 += 8; a1 += 8; a2 += 8; a3 += 8;
-
-        const __m256i vb_lo = _mm256_loadu_si256((const __m256i*)(w));
-        const __m256i vb_hi = _mm256_loadu_si256((const __m256i*)(w + 32));
-        w += 64;
-
-        vacc0_lo = _mm256_add_epi32(vacc0_lo,
-            _mm256_madd_epi16(_mm256_maddubs_epi16(va0, vb_lo), vones));
-        vacc0_hi = _mm256_add_epi32(vacc0_hi,
-            _mm256_madd_epi16(_mm256_maddubs_epi16(va0, vb_hi), vones));
-        vacc1_lo = _mm256_add_epi32(vacc1_lo,
-            _mm256_madd_epi16(_mm256_maddubs_epi16(va1, vb_lo), vones));
-        vacc1_hi = _mm256_add_epi32(vacc1_hi,
-            _mm256_madd_epi16(_mm256_maddubs_epi16(va1, vb_hi), vones));
-        vacc2_lo = _mm256_add_epi32(vacc2_lo,
-            _mm256_madd_epi16(_mm256_maddubs_epi16(va2, vb_lo), vones));
-        vacc2_hi = _mm256_add_epi32(vacc2_hi,
-            _mm256_madd_epi16(_mm256_maddubs_epi16(va2, vb_hi), vones));
-        vacc3_lo = _mm256_add_epi32(vacc3_lo,
-            _mm256_madd_epi16(_mm256_maddubs_epi16(va3, vb_lo), vones));
-        vacc3_hi = _mm256_add_epi32(vacc3_hi,
-            _mm256_madd_epi16(_mm256_maddubs_epi16(va3, vb_hi), vones));
-    }
-
-    /* Reduce: hadd+permute to get [n0,n1,n2,n3,n4,n5,n6,n7] per row */
-    __m256i vout0 = _mm256_permute4x64_epi64(
-        _mm256_hadd_epi32(vacc0_lo, vacc0_hi), 0xD8);
-    __m256i vout1 = _mm256_permute4x64_epi64(
-        _mm256_hadd_epi32(vacc1_lo, vacc1_hi), 0xD8);
-    __m256i vout2 = _mm256_permute4x64_epi64(
-        _mm256_hadd_epi32(vacc2_lo, vacc2_hi), 0xD8);
-    __m256i vout3 = _mm256_permute4x64_epi64(
-        _mm256_hadd_epi32(vacc3_lo, vacc3_hi), 0xD8);
 
     _mm256_storeu_si256((__m256i*)(c), vout0);
     if (mr > 1) _mm256_storeu_si256((__m256i*)(c + c_stride), vout1);
     if (mr > 2) _mm256_storeu_si256((__m256i*)(c + 2 * c_stride), vout2);
     if (mr > 3) _mm256_storeu_si256((__m256i*)(c + 3 * c_stride), vout3);
-    } /* end AVX2 fallback scope */
+    } return;
+#endif
+
+    /* AVX2: saturation-free s8×s8 via cvtepi8_epi16 + vpmaddwd.
+     *
+     * Old approach (vpmaddubsw) saturates at s16 when u8*s8 pair > 32767.
+     * New approach: sign-extend both A and B to s16, use vpmaddwd (s16×s16→s32).
+     * Max pair: 127*127 + 127*127 = 32258 < 32767. No saturation possible.
+     *
+     * Process 2 B columns per __m256i: load 16 B bytes → cvtepi8_epi16 → 16 s16.
+     * A: 8 bytes → cvtepi8_epi16 → 8 s16 in __m128i → broadcast to __m256i.
+     * vpmaddwd: [a0*b0+a1*b1, a2*b2+a3*b3, ...] → 4 partials per col, 2 cols per reg.
+     *
+     * After K loop: hadd twice to reduce 4 partials → 1 per column.
+     * No XOR trick needed — direct s8 multiply. No col_sums compensation.
+     */ {
+
+    /* 4 rows × 4 acc pairs (each pair = 2 cols) = 16 __m256i accumulators */
+    __m256i acc[4][4]; /* acc[row][pair]: pair 0=c0c1, 1=c2c3, 2=c4c5, 3=c6c7 */
+    for (int r = 0; r < 4; r++)
+        for (int p = 0; p < 4; p++)
+            acc[r][p] = _mm256_setzero_si256();
+
+    const int8_t* a_row[4];
+    a_row[0] = a;
+    a_row[1] = (mr > 1) ? a + a_stride : a;
+    a_row[2] = (mr > 2) ? a + 2*a_stride : a;
+    a_row[3] = (mr > 3) ? a + 3*a_stride : a;
+
+    for (int k = 0; k < K; k += 8) {
+        /* Load B: 4 pairs of 2 columns each (8 cols × 8 k-values = 64 bytes) */
+        /* B layout: [col0: 8 bytes, col1: 8 bytes, ..., col7: 8 bytes] */
+        const __m128i* bptr = (const __m128i*)w;
+        __m256i vb01 = _mm256_cvtepi8_epi16(_mm_loadu_si128(bptr));     /* cols 0-1 → 16 s16 */
+        __m256i vb23 = _mm256_cvtepi8_epi16(_mm_loadu_si128(bptr + 1)); /* cols 2-3 */
+        __m256i vb45 = _mm256_cvtepi8_epi16(_mm_loadu_si128(bptr + 2)); /* cols 4-5 */
+        __m256i vb67 = _mm256_cvtepi8_epi16(_mm_loadu_si128(bptr + 3)); /* cols 6-7 */
+        w += 64;
+
+        for (int r = 0; r < mr; r++) {
+            /* A: 8 s8 → sign-extend to 8 s16, broadcast to both lanes */
+            __m128i a8 = _mm_loadl_epi64((const __m128i*)(a_row[r] + k));
+            __m128i a_s16 = _mm_cvtepi8_epi16(a8); /* 8 × s16 in __m128i */
+            __m256i va = _mm256_broadcastsi128_si256(a_s16); /* [a0..a7, a0..a7] s16 */
+
+            /* vpmaddwd: s16×s16 → s32, pairs summed. 4 partials per col, 2 cols per reg. */
+            acc[r][0] = _mm256_add_epi32(acc[r][0], _mm256_madd_epi16(va, vb01));
+            acc[r][1] = _mm256_add_epi32(acc[r][1], _mm256_madd_epi16(va, vb23));
+            acc[r][2] = _mm256_add_epi32(acc[r][2], _mm256_madd_epi16(va, vb45));
+            acc[r][3] = _mm256_add_epi32(acc[r][3], _mm256_madd_epi16(va, vb67));
+        }
+    }
+
+    /* Reduce: 4 partials per col → 1. Use hadd twice + interleave.
+     * acc[r][0] = [4 partials col0 | 4 partials col1]
+     * acc[r][1] = [4 partials col2 | 4 partials col3]
+     * hadd(acc[0], acc[1]) → [p01_c0, p23_c0, p01_c2, p23_c2 | p01_c1, p23_c1, p01_c3, p23_c3]
+     * hadd(acc[2], acc[3]) → similar for cols 4-7
+     * hadd(h01, h23) → [sum_c0, sum_c2, sum_c4, sum_c6 | sum_c1, sum_c3, sum_c5, sum_c7]
+     * Interleave lanes → [c0,c1,c2,c3,c4,c5,c6,c7] */
+    for (int r = 0; r < mr; r++) {
+        __m256i h01 = _mm256_hadd_epi32(acc[r][0], acc[r][1]);
+        __m256i h23 = _mm256_hadd_epi32(acc[r][2], acc[r][3]);
+        __m256i h   = _mm256_hadd_epi32(h01, h23);
+        /* h = [c0,c2,c4,c6 | c1,c3,c5,c7] — need interleave */
+        __m128i even = _mm256_castsi256_si128(h);
+        __m128i odd  = _mm256_extracti128_si256(h, 1);
+        __m128i lo = _mm_unpacklo_epi32(even, odd); /* [c0,c1,c2,c3] */
+        __m128i hi = _mm_unpackhi_epi32(even, odd); /* [c4,c5,c6,c7] */
+        __m256i result = _mm256_set_m128i(hi, lo);
+
+        _mm256_storeu_si256((__m256i*)(c + r * c_stride), result);
+    }
+    } /* end AVX2 scope */
 }
 
 /* ============ Full GEMM with blocking ============ */
@@ -349,12 +335,13 @@ void int8_gemm_4x8c8(
                 A_eff + (size_t)m * A_stride, A_stride,
                 w_data,
                 acc, 8,
-                K_padded, mr);
+                K_padded, mr,
+                col_sums + n);  /* pass per-group col_sums for VNNI compensation */
 
-            /* Apply compensation and store to C */
+            /* Store to C (col_sums already subtracted inside ukernel for VNNI) */
             for (int i = 0; i < mr; i++) {
                 for (int j = 0; j < 8 && (n + j) < N; j++) {
-                    C[(size_t)(m + i) * N + (n + j)] = acc[i * 8 + j] - col_sums[n + j];
+                    C[(size_t)(m + i) * N + (n + j)] = acc[i * 8 + j];
                 }
             }
 
@@ -411,14 +398,15 @@ void int8_gemm_4x8c8_fused(
 
             gemm_4x8c8_ukernel(
                 A_eff + (size_t)m * A_stride, A_stride,
-                w_data, acc, 8, K_padded, mr);
+                w_data, acc, 8, K_padded, mr,
+                col_sums + n);
 
             /* Fused: compensate + dequant + bias + relu + requant → int8 */
             for (int i = 0; i < mr; i++) {
                 int8_t* orow = out + (size_t)(m + i) * N;
                 for (int j = 0; j < 8 && (n + j) < N; j++) {
                     int c = n + j;
-                    float fp = (float)(acc[i * 8 + j] - col_sums[c]) * w_scales[c];
+                    float fp = (float)(acc[i * 8 + j]) * w_scales[c];
                     if (bias) fp += bias[c];
                     if (do_relu && fp < 0) fp = 0;
                     int q = (int)lrintf(fp * inv_out[c]);

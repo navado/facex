@@ -255,23 +255,44 @@ void matmul_dynamic_int8(const float* A_fp32, int M, int K, int N,
                          const void* W_packed, const int32_t* col_sums,
                          const float* w_scales, float* C_fp32)
 {
-    /* 1. Find max|A| for per-tensor quantization */
-    float a_max = 0;
+    int K_padded = (K + 7) & ~7;
     int n_elem = M * K;
-#ifdef __AVX2__
+
+    /* Static workspace (avoid malloc per call) */
+    static int8_t* s_A_int8 = NULL;
+    static int32_t* s_C_int32 = NULL;
+    static size_t s_A_cap = 0, s_C_cap = 0;
+    size_t a_need = (size_t)M * K_padded;
+    size_t c_need = (size_t)M * N;
+    if (a_need > s_A_cap) { free(s_A_int8); s_A_int8 = (int8_t*)malloc(a_need); s_A_cap = a_need; }
+    if (c_need > s_C_cap) { free(s_C_int32); s_C_int32 = (int32_t*)malloc(c_need * 4); s_C_cap = c_need; }
+    int8_t* A_int8 = s_A_int8;
+    int32_t* C_int32 = s_C_int32;
+
+    /* Dynamic per-tensor quantization: find max|A| then quantize.
+     * AVX-512: scan 16 floats per iteration. */
+    float a_max = 0;
+#ifdef __AVX512F__
+    {
+        __m512 vmax = _mm512_setzero_ps();
+        int i = 0;
+        for (; i + 16 <= n_elem; i += 16)
+            vmax = _mm512_max_ps(vmax, _mm512_abs_ps(_mm512_loadu_ps(A_fp32 + i)));
+        a_max = _mm512_reduce_max_ps(vmax);
+        for (; i < n_elem; i++) {
+            float v = A_fp32[i] < 0 ? -A_fp32[i] : A_fp32[i];
+            if (v > a_max) a_max = v;
+        }
+    }
+#elif defined(__AVX2__)
     {
         __m256 vmax = _mm256_setzero_ps();
-        __m256 vmask = _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF)); /* abs mask */
+        __m256 vmask = _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF));
         int i = 0;
-        for (; i + 8 <= n_elem; i += 8) {
-            __m256 v = _mm256_and_ps(_mm256_loadu_ps(A_fp32 + i), vmask);
-            vmax = _mm256_max_ps(vmax, v);
-        }
-        /* Horizontal max */
-        __m128 lo = _mm256_castps256_ps128(vmax);
-        __m128 hi = _mm256_extractf128_ps(vmax, 1);
-        lo = _mm_max_ps(lo, hi);
-        lo = _mm_max_ps(lo, _mm_movehl_ps(lo, lo));
+        for (; i + 8 <= n_elem; i += 8)
+            vmax = _mm256_max_ps(vmax, _mm256_and_ps(_mm256_loadu_ps(A_fp32 + i), vmask));
+        __m128 lo = _mm256_castps256_ps128(vmax), hi = _mm256_extractf128_ps(vmax, 1);
+        lo = _mm_max_ps(lo, hi); lo = _mm_max_ps(lo, _mm_movehl_ps(lo, lo));
         lo = _mm_max_ss(lo, _mm_movehdup_ps(lo));
         a_max = _mm_cvtss_f32(lo);
         for (; i < n_elem; i++) {
@@ -289,42 +310,73 @@ void matmul_dynamic_int8(const float* A_fp32, int M, int K, int N,
     if (a_scale < 1e-8f) a_scale = 1e-8f;
     float a_inv = 1.0f / a_scale;
 
-    /* 2. Quantize A to int8 — use static workspace to avoid malloc */
-    int K_padded = (K + 7) & ~7;
-    static int8_t* s_A_int8 = NULL;
-    static int32_t* s_C_int32 = NULL;
-    static size_t s_A_cap = 0, s_C_cap = 0;
-    size_t a_need = (size_t)M * K_padded;
-    size_t c_need = (size_t)M * N;
-    if (a_need > s_A_cap) { free(s_A_int8); s_A_int8 = (int8_t*)malloc(a_need); s_A_cap = a_need; }
-    if (c_need > s_C_cap) { free(s_C_int32); s_C_int32 = (int32_t*)malloc(c_need * 4); s_C_cap = c_need; }
-
-    int8_t* A_int8 = s_A_int8;
-    int i_a = 0;
-#ifdef __AVX2__
-    __m256 v_inv = _mm256_set1_ps(a_inv);
-    for (int m = 0; m < M; m++) {
-        const float* arow = A_fp32 + (size_t)m * K;
-        int8_t* orow = A_int8 + (size_t)m * K_padded;
-        int k = 0;
-        for (; k + 8 <= K; k += 8) {
-            __m256 vf = _mm256_loadu_ps(arow + k);
-            __m256i vi = _mm256_cvtps_epi32(_mm256_mul_ps(vf, v_inv));
-            vi = _mm256_max_epi32(vi, _mm256_set1_epi32(-128));
-            vi = _mm256_min_epi32(vi, _mm256_set1_epi32(127));
-            /* Pack int32 → int8 */
-            __m128i lo = _mm256_castsi256_si128(vi);
-            __m128i hi = _mm256_extracti128_si256(vi, 1);
-            __m128i i16 = _mm_packs_epi32(lo, hi);
-            __m128i i8 = _mm_packs_epi16(i16, i16);
-            *(int64_t*)(orow + k) = _mm_extract_epi64(i8, 0);
+    /* Quantize A: AVX-512 processes 16 floats → 16 int8 per iteration */
+#ifdef __AVX512F__
+    {
+        __m512 vinv = _mm512_set1_ps(a_inv);
+        for (int m = 0; m < M; m++) {
+            const float* arow = A_fp32 + (size_t)m * K;
+            int8_t* orow = A_int8 + (size_t)m * K_padded;
+            int k = 0;
+            for (; k + 16 <= K; k += 16) {
+                __m512 vf = _mm512_loadu_ps(arow + k);
+                __m512i vi = _mm512_cvtps_epi32(_mm512_mul_ps(vf, vinv));
+                vi = _mm512_max_epi32(vi, _mm512_set1_epi32(-128));
+                vi = _mm512_min_epi32(vi, _mm512_set1_epi32(127));
+                /* Pack 16 × int32 → 16 × int8 via two-stage packs */
+                __m256i lo = _mm512_castsi512_si256(vi);
+                __m256i hi = _mm512_extracti64x4_epi64(vi, 1);
+                __m256i i16 = _mm256_packs_epi32(lo, hi);
+                i16 = _mm256_permute4x64_epi64(i16, 0xD8);
+                __m128i i16_lo = _mm256_castsi256_si128(i16);
+                __m128i i16_hi = _mm256_extracti128_si256(i16, 1);
+                __m128i i8 = _mm_packs_epi16(i16_lo, i16_hi);
+                _mm_storeu_si128((__m128i*)(orow + k), i8);
+            }
+            for (; k + 8 <= K; k += 8) {
+                __m256 vf = _mm256_loadu_ps(arow + k);
+                __m256i vi = _mm256_cvtps_epi32(_mm256_mul_ps(vf, _mm256_set1_ps(a_inv)));
+                vi = _mm256_max_epi32(vi, _mm256_set1_epi32(-128));
+                vi = _mm256_min_epi32(vi, _mm256_set1_epi32(127));
+                __m128i lo2 = _mm256_castsi256_si128(vi);
+                __m128i hi2 = _mm256_extracti128_si256(vi, 1);
+                __m128i i16 = _mm_packs_epi32(lo2, hi2);
+                __m128i i8 = _mm_packs_epi16(i16, i16);
+                *(int64_t*)(orow + k) = _mm_extract_epi64(i8, 0);
+            }
+            for (; k < K; k++) {
+                int q = (int)(arow[k] * a_inv + (arow[k] >= 0 ? 0.5f : -0.5f));
+                if (q > 127) q = 127; if (q < -128) q = -128;
+                orow[k] = (int8_t)q;
+            }
+            for (int k2 = K; k2 < K_padded; k2++) orow[k2] = 0;
         }
-        for (; k < K; k++) {
-            int q = (int)(arow[k] * a_inv + (arow[k] >= 0 ? 0.5f : -0.5f));
-            if (q > 127) q = 127; if (q < -128) q = -128;
-            orow[k] = (int8_t)q;
+    }
+#elif defined(__AVX2__)
+    {
+        __m256 v_inv = _mm256_set1_ps(a_inv);
+        for (int m = 0; m < M; m++) {
+            const float* arow = A_fp32 + (size_t)m * K;
+            int8_t* orow = A_int8 + (size_t)m * K_padded;
+            int k = 0;
+            for (; k + 8 <= K; k += 8) {
+                __m256 vf = _mm256_loadu_ps(arow + k);
+                __m256i vi = _mm256_cvtps_epi32(_mm256_mul_ps(vf, v_inv));
+                vi = _mm256_max_epi32(vi, _mm256_set1_epi32(-128));
+                vi = _mm256_min_epi32(vi, _mm256_set1_epi32(127));
+                __m128i lo = _mm256_castsi256_si128(vi);
+                __m128i hi = _mm256_extracti128_si256(vi, 1);
+                __m128i i16 = _mm_packs_epi32(lo, hi);
+                __m128i i8 = _mm_packs_epi16(i16, i16);
+                *(int64_t*)(orow + k) = _mm_extract_epi64(i8, 0);
+            }
+            for (; k < K; k++) {
+                int q = (int)(arow[k] * a_inv + (arow[k] >= 0 ? 0.5f : -0.5f));
+                if (q > 127) q = 127; if (q < -128) q = -128;
+                orow[k] = (int8_t)q;
+            }
+            for (int k2 = K; k2 < K_padded; k2++) orow[k2] = 0;
         }
-        for (int k2 = K; k2 < K_padded; k2++) orow[k2] = 0;
     }
 #else
     for (int m = 0; m < M; m++) {
@@ -340,23 +392,47 @@ void matmul_dynamic_int8(const float* A_fp32, int M, int K, int N,
     /* 3. INT8 GEMM */
     extern void int8_gemm_4x8c8(const int8_t*, int, int, int,
                                   const void*, int32_t*, const int32_t*);
-    int32_t* C_int32 = s_C_int32;
     int8_gemm_4x8c8(A_int8, M, K_padded, N, W_packed, C_int32, col_sums);
 
-    /* 4. Dequant: fp32 = int32 * a_scale * w_scale[n] */
-#ifdef __AVX2__
-    __m256 v_ascale = _mm256_set1_ps(a_scale);
-    for (int m = 0; m < M; m++) {
-        int n = 0;
-        for (; n + 8 <= N; n += 8) {
-            __m256i vi32 = _mm256_loadu_si256((__m256i*)(C_int32 + m*N + n));
-            __m256 vf = _mm256_cvtepi32_ps(vi32);
-            __m256 vws = _mm256_loadu_ps(w_scales + n);
-            vf = _mm256_mul_ps(_mm256_mul_ps(vf, v_ascale), vws);
-            _mm256_storeu_ps(C_fp32 + m*N + n, vf);
+    /* 4. Dequant: AVX-512 with FMA for combined multiply */
+#ifdef __AVX512F__
+    {
+        __m512 v_ascale = _mm512_set1_ps(a_scale);
+        for (int m = 0; m < M; m++) {
+            int n = 0;
+            for (; n + 16 <= N; n += 16) {
+                __m512i vi32 = _mm512_loadu_si512((__m512i*)(C_int32 + m*N + n));
+                __m512 vf = _mm512_cvtepi32_ps(vi32);
+                __m512 vws = _mm512_loadu_ps(w_scales + n);
+                vf = _mm512_mul_ps(_mm512_mul_ps(vf, v_ascale), vws);
+                _mm512_storeu_ps(C_fp32 + m*N + n, vf);
+            }
+            for (; n + 8 <= N; n += 8) {
+                __m256i vi32 = _mm256_loadu_si256((__m256i*)(C_int32 + m*N + n));
+                __m256 vf = _mm256_cvtepi32_ps(vi32);
+                __m256 vws = _mm256_loadu_ps(w_scales + n);
+                vf = _mm256_mul_ps(_mm256_mul_ps(vf, _mm256_set1_ps(a_scale)), vws);
+                _mm256_storeu_ps(C_fp32 + m*N + n, vf);
+            }
+            for (; n < N; n++)
+                C_fp32[m*N+n] = (float)C_int32[m*N+n] * a_scale * w_scales[n];
         }
-        for (; n < N; n++)
-            C_fp32[m*N+n] = (float)C_int32[m*N+n] * a_scale * w_scales[n];
+    }
+#elif defined(__AVX2__)
+    {
+        __m256 v_ascale = _mm256_set1_ps(a_scale);
+        for (int m = 0; m < M; m++) {
+            int n = 0;
+            for (; n + 8 <= N; n += 8) {
+                __m256i vi32 = _mm256_loadu_si256((__m256i*)(C_int32 + m*N + n));
+                __m256 vf = _mm256_cvtepi32_ps(vi32);
+                __m256 vws = _mm256_loadu_ps(w_scales + n);
+                vf = _mm256_mul_ps(_mm256_mul_ps(vf, v_ascale), vws);
+                _mm256_storeu_ps(C_fp32 + m*N + n, vf);
+            }
+            for (; n < N; n++)
+                C_fp32[m*N+n] = (float)C_int32[m*N+n] * a_scale * w_scales[n];
+        }
     }
 #else
     for (int m = 0; m < M; m++)
