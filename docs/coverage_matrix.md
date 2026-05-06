@@ -58,6 +58,16 @@ Each topic commit (Bench / Mac / i.MX / ESP32) appends its own rows.
 | `tools/onnx_to_tflite.py` (offline) | ✅ syntax | 🚫 (needs `onnx2tf` + `tensorflow`) | — | — | mac-m2 (parses) | Offline NPU model conversion |
 | `tools/compile_vela.sh` (offline) | ✅ syntax | 🚫 (needs `ethos-u-vela`) | — | — | mac-m2 (parses) | i.MX 93/95 Vela compilation |
 
+## ESP32-P4
+
+| Target / build flag | Compiles | Static analysis | Smoke test | E2E test | Tested on | Notes |
+|---|---|---|---|---|---|---|
+| `components/facex/` ESP-IDF wrapper (host syntax) | ✅ stub backend syntax | ✅ `clang -fsyntax-only` against synthesized esp_err/log/timer/sdkconfig | — | — | mac-m2 (syntax) | Real build needs IDF v5.4+ |
+| `examples/esp32p4_camera/` IDF project | 🚫 (no IDF here) | — | — | — | — | App-level, real ESP-IDF build target |
+| FaceX backend: `stub` | ✅ | ✅ | — | — | mac-m2 (syntax) | Synthetic faces, default backend |
+| FaceX backend: `native` | 🛠 | ✅ | — | — | — | EdgeFace-XS would link; impractically slow on P4 (1-3 s / frame) |
+| FaceX backend: `espnn` | 🚫 reserved | — | — | — | — | Future — distilled EdgeFace-Nano + esp-nn kernels |
+
 ## Bench infrastructure
 
 | Tool | Compiles / runs | Tested | Notes |

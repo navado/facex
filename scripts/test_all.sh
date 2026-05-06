@@ -253,6 +253,49 @@ run "tests/test_imx_npu_compile.c syntax-check" \
 rm -rf "$STUB_DIR"
 
 # ---------------------------------------------------------------------------
+hdr "ESP32-P4 component (syntax-only, no IDF here)"
+# We don't have ESP-IDF locally — synthesize the minimal IDF headers
+# (esp_err.h, esp_log.h, esp_timer.h, sdkconfig.h) just enough to syntax-
+# check our wrapper. Real builds happen via idf.py on a host with IDF.
+IDF_STUB="$(mktemp -d -t facex_idf_stub.XXXX)"
+cat > "$IDF_STUB/esp_err.h" <<'EOF'
+#pragma once
+#include <stdint.h>
+typedef int esp_err_t;
+#define ESP_OK                  0
+#define ESP_FAIL               -1
+#define ESP_ERR_INVALID_ARG     0x102
+#define ESP_ERR_INVALID_STATE   0x103
+#define ESP_ERR_NOT_FOUND       0x105
+#define ESP_LOGE(t, ...)        ((void)0)
+#define ESP_LOGW(t, ...)        ((void)0)
+#define ESP_LOGI(t, ...)        ((void)0)
+#define ESP_LOGD(t, ...)        ((void)0)
+#define ESP_RETURN_ON_ERROR(x, t, ...) do { esp_err_t _e=(x); if (_e) return _e; } while(0)
+#define ESP_ERROR_CHECK(x)      do { (void)(x); } while(0)
+EOF
+cat > "$IDF_STUB/esp_log.h"   <<'EOF'
+#pragma once
+#include "esp_err.h"
+EOF
+cat > "$IDF_STUB/esp_timer.h" <<'EOF'
+#pragma once
+#include <stdint.h>
+static inline int64_t esp_timer_get_time(void){return 0;}
+EOF
+cat > "$IDF_STUB/sdkconfig.h" <<'EOF'
+#pragma once
+#define CONFIG_FACEX_BACKEND_STUB 1
+EOF
+run "components/facex/src/facex_esp.c syntax-check" \
+    clang -fsyntax-only \
+          -Icomponents/facex/include \
+          -I"$IDF_STUB" \
+          -include esp_err.h \
+          components/facex/src/facex_esp.c
+rm -rf "$IDF_STUB"
+
+# ---------------------------------------------------------------------------
 hdr "Camera benchmark"
 if [[ "$OS" = "Darwin" && "$SKIP_CAMERA" = 0 ]]; then
     run "make bench-camera"          make bench-camera

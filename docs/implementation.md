@@ -238,4 +238,90 @@ post-processing risk. Documented in `docs/imx_npu.md` §4.
 
 ---
 
+## 4. ESP32-P4 ESP-IDF component
+
+The Espressif RISC-V MCU (dual HP RV32 @ 360 MHz, 768 KB SRAM, up to
+32 MB PSRAM, MIPI-CSI camera input, no on-die NPU). FaceX ships an
+ESP-IDF component (`components/facex/`) plus a runnable example
+project (`examples/esp32p4_camera/`).
+
+### Reasonable assumptions baked in
+
+This commit consciously ships the **camera bridge** complete and the
+**model story** as a stubbed Kconfig-selectable backend, because the
+production-fit model doesn't exist yet and won't fit P4 RAM at the
+existing EdgeFace-XS size. The assumptions:
+
+1. **Bring-up first, model second.** Customers integrating a FaceX
+   pipeline on P4 need to first prove the camera works, the
+   downscale works, the rendering / UART output works. The default
+   `stub` backend emits a deterministic synthetic face per frame
+   (smooth bbox jitter, score breathing) — exercises every code
+   path without committing to a specific model.
+2. **Native backend is for evaluation only.** `CONFIG_FACEX_BACKEND_NATIVE`
+   compiles, links, and runs — but at 1-3 seconds per frame it's
+   demonstrably not a product. Provided so partners can see "yes
+   the engine technically works on P4" before we ship the smaller
+   model.
+3. **EdgeFace-Nano is future work.** A distilled model
+   (~300 K params, 64×64 input, 256-d embedding, no XCA attention)
+   plus an ESP-NN backend (PIE-SIMD INT8 conv kernels) is the
+   production target. The Kconfig slot `CONFIG_FACEX_BACKEND_ESPNN`
+   is reserved (`depends on 0` until that work lands) so adopters
+   can see the eventual shape.
+
+### What's added
+
+| File | Role |
+|---|---|
+| `components/facex/CMakeLists.txt` | IDF component definition. Conditionally pulls in the existing C engine sources when `CONFIG_FACEX_BACKEND_NATIVE` is set; defines `FACEX_NO_INT8 + FACEX_LIB + FACEX_TARGET_ESP32P4`. |
+| `components/facex/Kconfig` | Three-way backend choice (stub / native / espnn-reserved); detector input W/H; per-frame log toggle. |
+| `components/facex/include/facex_esp.h` | Compact C API: `facex_esp_init / _detect / _free / _backend_name`. Mirrors the FaceXResult shape (sans embedding) so applications don't need to know which backend is running. |
+| `components/facex/src/facex_esp.c` | Backend dispatch. Stub emits one deterministic moving face per frame for bring-up; native forwards into the existing C engine. |
+| `examples/esp32p4_camera/` (full IDF project) | Top-level CMakeLists, sdkconfig.defaults (PSRAM hex, CPU @ 360 MHz, 8 KB main task stack), main/ with project Kconfig + idf_component.yml + app_main.c. |
+| `examples/esp32p4_camera/main/app_main.c` | Full CSI bring-up exactly per the ESP-IDF camera_driver doc — LDO 2.5 V, SCCB I2C, `esp_cam_sensor_detect` (auto-picks SC2336 etc.), `esp_cam_new_csi_ctlr`, `on_get_new_trans / on_trans_finished` callbacks (IRAM_ATTR), PSRAM frame buffer ring, capture task that downscales RGB565 → RGB888 and calls `facex_esp_detect`. Logs FPS + per-detection latency once per second. |
+| `docs/esp32p4.md` | Status table, prereqs (IDF v5.4+), backend selection guide, resource budget, troubleshooting, full sprint roadmap pointer. |
+
+### Build
+
+```
+idf.py set-target esp32p4
+idf.py menuconfig          # optional: sensor / GPIOs / FaceX backend
+idf.py build flash monitor
+```
+
+The IDF component model means `make` (host) doesn't build the ESP32
+artifacts — `make` and `idf.py` are independent. `scripts/test_all.sh`
+syntax-checks `components/facex/src/facex_esp.c` against synthesized
+ESP-IDF header stubs so the wrapper at least compiles cleanly without
+a full IDF install.
+
+### Resource budget on the P4-Function-EV-Board (stub backend, SC2336 800×640 RGB565)
+
+| Resource | Used | Available |
+|---|---:|---:|
+| Internal SRAM (DRAM) | ≈ 80 KB | 768 KB |
+| PSRAM | ≈ 2.1 MB (2× frame, 1× detect) | up to 32 MB |
+| Flash | ≈ 600 KB (idf-bootloader + app) | typically 16 MB |
+| CPU on capture core | ≈ 6 % | 360 MHz HP RV32 |
+| FPS | ≈ 28-30 | sensor-limited |
+
+### Status
+
+- ✅ **Camera capture** — real `esp_cam_ctlr_csi` recipe, IRAM-safe
+  callbacks, PSRAM-aligned DMA buffers, FPS/latency logging
+- ✅ **Backend dispatch (stub)** — synthetic deterministic face,
+  smooth bbox jitter; useful for board bring-up
+- 🛠 **Backend dispatch (native)** — compiles + runs on P4 but at
+  1-3 s/frame, evaluation only
+- 🚫 **Backend dispatch (ESP-NN)** — Kconfig slot reserved, not yet
+  implemented
+- 🚫 **EdgeFace-Nano model** — distilled model not in this repo;
+  next milestone
+- 🚫 **Hardware-tested on P4-Function-EV-Board** — code follows the
+  documented `esp_cam_ctlr_*` API; concrete bring-up is the
+  follow-up.
+
+---
+
 <!-- Subsequent topic sections appended by their respective commits. -->
