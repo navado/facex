@@ -11,6 +11,7 @@
 facex-cli
 facex-example
 facex-encrypt
+facex-mac-test
 facex-bench
 facex-camera-bench
 golden-test

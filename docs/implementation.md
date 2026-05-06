@@ -100,4 +100,78 @@ ANE) are added in the Mac commit — not part of the Bench foundation.
 
 ---
 
+## 2. Apple Silicon / Mac perf paths
+
+Default `make` on Apple Silicon already runs the NEON kernels from the
+Bench foundation. This section adds the **Apple-specific** acceleration
+paths — they're opt-in build flags, never the default, so the same source
+keeps shipping to anyone with any Mac.
+
+### What's added
+
+| File | Role |
+|---|---|
+| `src/cpu_features.{h,c}` | Runtime probe for `FEAT_SME` / `FEAT_SME2` via `sysctlbyname`; cached, atomic, no external deps. Used by SME dispatcher; designed to be reused by future runtime probes (FP16, BF16, dotprod). |
+| `src/transformer_ops_sme.c` | `__arm_locally_streaming __arm_new("za")` `matmul_fp32_packed` using `FMOPA` outer products into ZA tile 0. Pre-transposes A row tile (gather not allowed in streaming mode). Returns -1 on shapes it refuses (M < SVL/4 or K > 4096). Self-check at first matmul disables SME on output divergence > 1e-3. |
+| `src/backend_accelerate.c` | `cblas_sgemm` wrapper. Unpacks column-panel B to row-major, dispatches via Accelerate; AMX wins for M ≥ 4 and M·K·N ≥ 4096, otherwise falls back to NEON. Self-check at init: cblas vs scalar within 1e-4 relative. |
+| `src/backend_coreml.m` | Objective-C bridge (ARC) loading `.mlpackage` via `MLModel`. Configurable `compute_units` hint (ALL / CPU+GPU / CPU-only / CPU+ANE). L2-normalises output so cosine sim matches CPU backend. |
+| `include/facex_coreml.h` | Public C API for the Core ML bridge. |
+| `tests/test_mac.c` | Smoke test: load weights, embed sanity, determinism, self/cross similarity, latency stats, end-to-end detect. Now also reports compiled-in vs runtime-active backends. |
+| `tools/export_coreml.py` | ONNX → `.mlpackage` via `coremltools.convert(convert_to="mlprogram")` + INT8 palettization (`coremltools.optimize.coreml.palettize_weights`). Required to feed the Core ML bridge. |
+| `docs/mac.md` | Full Mac story — build modes, runtime fallback chain, permissions, perf reference table. |
+
+`src/transformer_ops.c` gains a dispatcher block at the top of
+`matmul_fp32_packed`:
+
+```
+Accelerate (AMX, M≥4 K·N≥4096) → SME (M4+) → NEON / AVX2 / scalar
+```
+
+Each opt-in dispatch is gated at compile time (`FACEX_HAVE_ACCELERATE`,
+`FACEX_HAVE_SME`) AND at runtime (cached self-check + capability probe).
+
+### Build matrix
+
+| Make invocation | What gets compiled in |
+|---|---|
+| `make` | NEON only (default; portable across M1-M5) |
+| `make ACCELERATE=1` | + AMX path via `cblas_sgemm` |
+| `make SME=1` | + M4+ SME path via FMOPA |
+| `make COREML=1` | + Core ML / ANE bridge (.mlpackage loader) |
+| `make ACCELERATE=1 SME=1 COREML=1` | all three; dispatcher chains them |
+| `make mac-universal` | fat arm64 + x86_64 archive |
+
+**Critical isolation:** `-march=armv9-a+sme` is applied PER-FILE (only to
+`transformer_ops_sme.c`), not globally. Without that, clang auto-vectorizes
+plain C in `transformer_ops.c` using SVE/SME instructions that trap on
+M1/M2/M3. Verified: `transformer_ops.o` contains zero `rdvl`/`smstart`/
+`fmopa`; `transformer_ops_sme.o` contains the expected `fmopa za0.s`.
+
+### Measured on mac-m2
+
+| Build | Embed median | E2E | Status |
+|---|---:|---:|---|
+| Default (NEON) | ~4.6 ms | ~8.4 ms | ✅ tested |
+| `ACCELERATE=1` (AMX) | ~3.5 ms (-22%) | ~7.5 ms (-13%) | ✅ tested |
+| `SME=1` on M2 | ~4.6 ms | ~8.4 ms | ✅ tested (SME inert; runtime probe = 0) |
+| `SME=1` on M4 | est. ~1.5 ms | est. ~5 ms | 🚫 needs M4 hardware (self-check guards correctness) |
+| `COREML=1` w/ real `.mlpackage` | est. ~0.8 ms | — | 🚫 needs ONNX export (tools/export_coreml.py is in tree) |
+| `mac-universal` (arm64+x86_64) | n/a | n/a | ✅ archive built; per-slice asm verified |
+
+Same embedding bytes regardless of backend choice — `||emb||²=0.0756`,
+self-similarity 1.0000, identical bbox. Backend ordering can shift the
+LSB by ~ULP; the self-check gates anything worse than 1e-4 relative.
+
+### Status by row
+
+- ✅ **NEON** (foundation; lives in Bench commit)
+- ✅ **Accelerate / AMX** — full e2e test on M2
+- ✅ **SME** — compiles + emits real `fmopa`; runtime self-check guards
+  M4 correctness; not directly hardware-tested
+- 🧪 **Core ML** — bridge compiles + links; missing-`.mlpackage` smoke
+  passes; ANE dispatch not validated end-to-end (needs the ONNX export)
+- ✅ **Universal binary** — both slices contain real arch-specific code
+
+---
+
 <!-- Subsequent topic sections appended by their respective commits. -->

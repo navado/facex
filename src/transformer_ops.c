@@ -10,6 +10,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#if defined(FACEX_HAVE_SME) || defined(FACEX_HAVE_ACCELERATE)
+#include <stdatomic.h>
+#endif
 
 #ifdef __AVX2__
 #include <immintrin.h>
@@ -638,6 +641,52 @@ static void _pgemm_worker(void* ctx_, int start, int end) {
  * AVX2 fallback: NR=8 (one YMM = 8 floats). */
 void matmul_fp32_packed(const float* A, const float* B_packed, float* C,
                         int M, int K, int N) {
+#ifdef FACEX_HAVE_ACCELERATE
+    /* Apple Accelerate.framework cblas_sgemm path. Runs on AMX, typically
+     * 2-3× our NEON throughput at sizes that matter. The wrapper unpacks
+     * the column-panel B into row-major and dispatches; for tiny M*K*N it
+     * returns -1 so we fall through to the in-tree NEON kernel. */
+    {
+        extern int matmul_fp32_packed_accelerate(const float*, const float*,
+                                                  float*, int, int, int);
+        extern int facex_accelerate_validate(void);
+        extern int facex_accelerate_enabled(void);
+        static _Atomic int acc_state = 0; /* 0 = unchecked, 1 = ok, -1 = bad */
+        int s = atomic_load_explicit(&acc_state, memory_order_acquire);
+        if (s == 0) {
+            s = (facex_accelerate_validate() == 0) ? 1 : -1;
+            atomic_store_explicit(&acc_state, s, memory_order_release);
+        }
+        if (s == 1 && facex_accelerate_enabled() &&
+            matmul_fp32_packed_accelerate(A, B_packed, C, M, K, N) == 0)
+            return;
+    }
+#endif
+#ifdef FACEX_HAVE_SME
+    /* SME dispatch (Apple M4+ / future ARMv9 with FEAT_SME).
+     * On first call we run a tiny SME-vs-scalar self-check; if SME is
+     * present and the check passes, every subsequent call uses it.
+     * The kernel itself returns -1 for shapes it refuses (M too small,
+     * K too large) so the existing arch path below acts as fallback. */
+    {
+        extern int facex_has_sme(void);
+        extern void facex_disable_sme(void);
+        extern int facex_sme_validate(void);
+        extern int matmul_fp32_packed_sme(const float*, const float*,
+                                          float*, int, int, int);
+        /* States: 0 = unchecked, 1 = enabled, -1 = disabled */
+        static _Atomic int sme_state = 0;
+        int s = atomic_load_explicit(&sme_state, memory_order_acquire);
+        if (s == 0) {
+            int ok = facex_has_sme() && (facex_sme_validate() == 0);
+            s = ok ? 1 : -1;
+            if (!ok) facex_disable_sme();
+            atomic_store_explicit(&sme_state, s, memory_order_release);
+        }
+        if (s == 1 && matmul_fp32_packed_sme(A, B_packed, C, M, K, N) == 0)
+            return;
+    }
+#endif
 #ifdef __AVX512F__
     /* AVX-512: NR=16, MR=4. 4 ZMM accumulators + 1 B + 4 A broadcasts = 9 regs (32 available). */
     int NR = 16;

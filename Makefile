@@ -35,6 +35,23 @@ ifeq ($(ARCH),arm64)
   endif
   GEMM_SRC = src/gemm_stub.c
   THREADPOOL_SRC = src/threadpool_pthread.c
+  # Opt-in SME path: `make SME=1` adds the M4+ Streaming-Matrix-Extension
+  # kernel + runtime detection. Default build stays portable (works on
+  # older Xcode / M1-M3 / non-Apple aarch64 boards). Requires Apple Clang
+  # 16+ (Xcode 16+) or upstream Clang 18+ for the ACLE 2024 SME intrinsics.
+  #
+  # IMPORTANT: -march=armv9-a+sme must NOT be applied to the dispatcher
+  # source (transformer_ops.c) — doing so lets clang auto-vectorize plain
+  # C using SVE/SME instructions that trap on M1/M2/M3. SME flags are
+  # applied per-file to transformer_ops_sme.c only (see SME_FLAGS below).
+  ifeq ($(SME),1)
+    CFLAGS  += -DFACEX_HAVE_SME
+    SME_FLAGS = -march=armv9-a+sme
+    SME_SRCS = src/transformer_ops_sme.c src/cpu_features.c
+  else
+    SME_FLAGS =
+    SME_SRCS =
+  endif
 else
   # x86-64 path (original)
   CFLAGS = -O3 -march=native -mfma -funroll-loops
@@ -48,6 +65,8 @@ else
   else
     THREADPOOL_SRC = src/threadpool.c
   endif
+  SME_SRCS =
+  SME_FLAGS =
 endif
 
 ifeq ($(OS),Windows_NT)
@@ -55,15 +74,61 @@ ifeq ($(OS),Windows_NT)
   EXT = .exe
 endif
 
-SRCS = src/facex.c src/transformer_ops.c $(GEMM_SRC) $(THREADPOOL_SRC)
+# Opt-in Apple Accelerate.framework path. Adds an AMX-backed matmul
+# dispatch via cblas_sgemm; falls back to NEON / AVX2 for the shapes
+# Accelerate refuses (tiny M*K*N) and disables itself at startup if
+# its self-check disagrees with a scalar reference.
+ifeq ($(ACCELERATE),1)
+  ifneq ($(UNAME_S),Darwin)
+    $(error ACCELERATE=1 requires macOS — Accelerate.framework is Apple-only)
+  endif
+  CFLAGS  += -DFACEX_HAVE_ACCELERATE
+  LDFLAGS += -framework Accelerate
+  ACC_SRCS = src/backend_accelerate.c
+else
+  ACC_SRCS =
+endif
 
-.PHONY: all clean example lib cli encrypt test bench detect-lib \
-        bench-camera bench-camera-debug bench-camera-profile
+# Opt-in Core ML / Apple Neural Engine path. Builds the Objective-C
+# bridge in src/backend_coreml.m and links CoreML.framework. The bridge
+# loads a precompiled `.mlpackage` (produced by tools/export_coreml.py
+# from an EdgeFace ONNX) and routes prediction to the ANE.
+ifeq ($(COREML),1)
+  ifneq ($(UNAME_S),Darwin)
+    $(error COREML=1 requires macOS — Core ML is Apple-only)
+  endif
+  CFLAGS  += -DFACEX_HAVE_COREML
+  COREML_FLAGS = -fobjc-arc
+  LDFLAGS += -framework CoreML -framework Foundation
+  COREML_SRCS = src/backend_coreml.m
+else
+  COREML_FLAGS =
+  COREML_SRCS =
+endif
+
+SRCS = src/facex.c src/transformer_ops.c $(GEMM_SRC) $(THREADPOOL_SRC) $(SME_SRCS) $(ACC_SRCS) $(COREML_SRCS)
+
+.PHONY: all clean example lib cli encrypt test mac-test bench detect-lib \
+        bench-camera bench-camera-debug bench-camera-profile \
+        mac-sme mac-universal mac-universal-arm64 mac-universal-x86_64
 
 all: lib cli detect-lib
 
 # Static library
 lib: libfacex.a
+
+SME_OBJS =
+ifeq ($(SME),1)
+  SME_OBJS = transformer_ops_sme.o cpu_features.o
+endif
+ACC_OBJS =
+ifeq ($(ACCELERATE),1)
+  ACC_OBJS = backend_accelerate.o
+endif
+COREML_OBJS =
+ifeq ($(COREML),1)
+  COREML_OBJS = backend_coreml.o
+endif
 
 libfacex.a: $(SRCS) src/detect.c src/align.c src/weight_crypto.c
 	$(CC) $(CFLAGS) -Iinclude -DFACEX_LIB -c src/facex.c -o facex.o
@@ -73,16 +138,49 @@ libfacex.a: $(SRCS) src/detect.c src/align.c src/weight_crypto.c
 	$(CC) $(CFLAGS) -Iinclude -c src/detect.c -o detect.o
 	$(CC) $(CFLAGS) -Iinclude -c src/align.c -o align.o
 	$(CC) $(CFLAGS) -Iinclude -c src/weight_crypto.c -o weight_crypto.o
-	ar rcs $@ facex.o transformer_ops.o gemm.o threadpool.o detect.o align.o weight_crypto.o
-	@rm -f facex.o transformer_ops.o gemm.o threadpool.o detect.o align.o weight_crypto.o
-	@echo "Built libfacex.a ($(ARCH))"
+ifeq ($(SME),1)
+	$(CC) $(CFLAGS) -Iinclude -c src/cpu_features.c -o cpu_features.o
+	$(CC) $(CFLAGS) $(SME_FLAGS) -Iinclude -c src/transformer_ops_sme.c -o transformer_ops_sme.o
+endif
+ifeq ($(ACCELERATE),1)
+	$(CC) $(CFLAGS) -Iinclude -c src/backend_accelerate.c -o backend_accelerate.o
+endif
+ifeq ($(COREML),1)
+	$(CC) $(CFLAGS) $(COREML_FLAGS) -Iinclude -c src/backend_coreml.m -o backend_coreml.o
+endif
+	ar rcs $@ facex.o transformer_ops.o gemm.o threadpool.o detect.o align.o weight_crypto.o $(SME_OBJS) $(ACC_OBJS) $(COREML_OBJS)
+	@rm -f facex.o transformer_ops.o gemm.o threadpool.o detect.o align.o weight_crypto.o $(SME_OBJS) $(ACC_OBJS) $(COREML_OBJS)
+	@echo "Built libfacex.a ($(ARCH)$(if $(filter 1,$(SME)), +SME,)$(if $(filter 1,$(ACCELERATE)), +Accelerate,)$(if $(filter 1,$(COREML)), +CoreML,))"
 
 # Standalone CLI (for Go subprocess / testing)
 cli: facex-cli$(EXT)
 
 facex-cli$(EXT): src/edgeface_engine.c src/transformer_ops.c $(GEMM_SRC) $(THREADPOOL_SRC) src/weight_crypto.c src/detect.c src/align.c
-	$(CC) $(CFLAGS) -Iinclude -o $@ $^ $(LDFLAGS)
-	@echo "Built facex-cli$(EXT) ($(ARCH))"
+	$(CC) $(CFLAGS) -Iinclude -c src/edgeface_engine.c   -o cli_engine.o
+	$(CC) $(CFLAGS) -Iinclude -c src/transformer_ops.c   -o cli_ops.o
+	$(CC) $(CFLAGS) -Iinclude -c $(GEMM_SRC)             -o cli_gemm.o
+	$(CC) $(CFLAGS) -Iinclude -c $(THREADPOOL_SRC)       -o cli_tp.o
+	$(CC) $(CFLAGS) -Iinclude -c src/weight_crypto.c     -o cli_wc.o
+	$(CC) $(CFLAGS) -Iinclude -c src/detect.c            -o cli_det.o
+	$(CC) $(CFLAGS) -Iinclude -c src/align.c             -o cli_align.o
+ifeq ($(SME),1)
+	$(CC) $(CFLAGS) -Iinclude -c src/cpu_features.c                      -o cli_cpuf.o
+	$(CC) $(CFLAGS) $(SME_FLAGS) -Iinclude -c src/transformer_ops_sme.c  -o cli_sme.o
+endif
+ifeq ($(ACCELERATE),1)
+	$(CC) $(CFLAGS) -Iinclude -c src/backend_accelerate.c                -o cli_acc.o
+endif
+ifeq ($(COREML),1)
+	$(CC) $(CFLAGS) $(COREML_FLAGS) -Iinclude -c src/backend_coreml.m    -o cli_coreml.o
+endif
+	$(CC) $(CFLAGS) -Iinclude -o $@ \
+	    cli_engine.o cli_ops.o cli_gemm.o cli_tp.o cli_wc.o cli_det.o cli_align.o \
+	    $(if $(filter 1,$(SME)),cli_cpuf.o cli_sme.o,) \
+	    $(if $(filter 1,$(ACCELERATE)),cli_acc.o,) \
+	    $(if $(filter 1,$(COREML)),cli_coreml.o,) \
+	    $(LDFLAGS)
+	@rm -f cli_*.o
+	@echo "Built facex-cli$(EXT) ($(ARCH)$(if $(filter 1,$(SME)), +SME,)$(if $(filter 1,$(ACCELERATE)), +Accelerate,)$(if $(filter 1,$(COREML)), +CoreML,))"
 
 # Example program
 example: facex-example$(EXT)
@@ -103,6 +201,52 @@ test: golden-test$(EXT)
 
 golden-test$(EXT): tests/golden_test.c libfacex.a
 	$(CC) $(CFLAGS) -Iinclude -o $@ $< -L. -lfacex $(LDFLAGS)
+
+# macOS arm64 smoke test (also runs on x86-64 macOS / Linux)
+mac-test: facex-mac-test$(EXT)
+	@./facex-mac-test$(EXT)
+
+facex-mac-test$(EXT): tests/test_mac.c libfacex.a
+	$(CC) $(CFLAGS) -Iinclude -o $@ $< -L. -lfacex $(LDFLAGS)
+
+# Convenience: `make mac-sme` builds the M4+ SME-enabled libfacex.a + cli.
+mac-sme:
+	@$(MAKE) clean
+	@$(MAKE) SME=1
+
+# Universal Mac dylib (arm64 + x86_64) for distribution. Each slice is
+# built by re-invoking make with target-specific flags, then `lipo`
+# combines them.
+mac-universal:
+	@if [ "$(UNAME_S)" != "Darwin" ]; then \
+	    echo "mac-universal is macOS-only" ; exit 1 ; fi
+	@$(MAKE) clean
+	@$(MAKE) mac-universal-arm64
+	@cp libfacex.a /tmp/libfacex-mac-arm64.a
+	@$(MAKE) clean
+	@$(MAKE) mac-universal-x86_64
+	@cp libfacex.a /tmp/libfacex-mac-x86_64.a
+	@lipo -create /tmp/libfacex-mac-arm64.a /tmp/libfacex-mac-x86_64.a \
+	      -output libfacex-universal.a
+	@rm -f /tmp/libfacex-mac-arm64.a /tmp/libfacex-mac-x86_64.a
+	@echo "Built libfacex-universal.a:"
+	@lipo -info libfacex-universal.a
+
+mac-universal-arm64:
+	$(MAKE) ARCH=arm64 \
+	        CFLAGS="-O3 -funroll-loops -DFACEX_NO_INT8 -arch arm64 -mmacosx-version-min=11.0" \
+	        GEMM_SRC=src/gemm_stub.c \
+	        THREADPOOL_SRC=src/threadpool_pthread.c \
+	        SME_SRCS= ACC_SRCS= COREML_SRCS= SME_OBJS= ACC_OBJS= COREML_OBJS= SME_FLAGS= COREML_FLAGS= \
+	        libfacex.a
+
+mac-universal-x86_64:
+	$(MAKE) ARCH=x86_64 \
+	        CFLAGS="-O3 -funroll-loops -mfma -arch x86_64 -mmacosx-version-min=11.0 -mavx2" \
+	        GEMM_SRC=src/gemm_int8_4x8c8.c \
+	        THREADPOOL_SRC=src/threadpool_pthread.c \
+	        SME_SRCS= ACC_SRCS= COREML_SRCS= SME_OBJS= ACC_OBJS= COREML_OBJS= SME_FLAGS= COREML_FLAGS= \
+	        libfacex.a
 
 # Unified latency bench. Same source / same output schema across every
 # build flavour — see scripts/bench_all.sh for the sweep that produces
@@ -136,6 +280,6 @@ libdetect.a: src/detect.c include/detect.h
 	@echo "Built libdetect.a"
 
 clean:
-	rm -f libfacex.a libdetect.a \
+	rm -f libfacex.a libfacex-arm64.a libfacex-x86_64.a libfacex-universal.a libdetect.a \
 	      facex-cli$(EXT) facex-example$(EXT) facex-encrypt$(EXT) \
-	      golden-test$(EXT) facex-bench$(EXT) facex-camera-bench *.o
+	      golden-test$(EXT) facex-mac-test$(EXT) facex-bench$(EXT) facex-camera-bench *.o

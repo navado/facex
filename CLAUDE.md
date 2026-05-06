@@ -22,8 +22,13 @@ make                  # libfacex.a + facex-cli + libdetect.a
 make example          # builds facex-example (links libfacex.a)
 make encrypt          # builds facex-encrypt
 make test             # builds + runs golden test against data/edgeface_xs_fp32.bin
+make mac-test         # macOS smoke test (embed + e2e + latency)
 make bench            # cross-platform synthetic latency bench (md/csv/json)
 make bench-camera     # macOS camera benchmark (Swift + AVFoundation)
+make ACCELERATE=1     # opt-in: dispatch matmul_fp32_packed through cblas_sgemm (AMX)
+make SME=1            # opt-in: M4+ SME (FMOPA-based outer-product matmul)
+make COREML=1         # opt-in: Core ML / ANE bridge (loads .mlpackage)
+make mac-universal    # fat arm64 + x86_64 libfacex-universal.a for distribution
 make clean
 scripts/test_all.sh   # run every test runnable on this host
 scripts/bench_all.sh  # sweep build flavours, produce one Markdown comparison table
@@ -81,6 +86,7 @@ See `docs/benchmarking.md` for the full guide.
 - **Threshold defaults:** detector score 0.5, NMS IoU 0.4, "same person" similarity > 0.3. These are the documented defaults; change them via `facex_set_*_threshold` rather than recompiling.
 - **Weight files are gitignored** (`*.bin`, `*.enc`, `*.npz`). Don't commit them; reference them through `download_weights.sh` or env vars (`FACEX_EMBED_WEIGHTS`, `FACEX_DETECT_WEIGHTS`).
 - **Detector is mid-rewrite.** Sprint plan in `docs/plan/detector_plan.md` is authoritative for direction. Files under `wasm/src/` are the ground-up rewrite; `wasm/detect_new.{js,wasm}` is the in-progress build artifact alongside the legacy `wasm/detect.{js,wasm}`.
+- **Mac perf paths are opt-in flags, not the default.** `make ACCELERATE=1` adds AMX via `cblas_sgemm`, `make SME=1` adds the M4+ SME path, `make COREML=1` adds the Core ML / ANE bridge. Default `make` stays portable across M1-M5 and any Xcode version; the optional flags require Xcode 16+ for SME. See `docs/mac.md` for the full Mac story.
 
 ## Limitations to keep in mind
 

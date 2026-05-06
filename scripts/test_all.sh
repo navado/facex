@@ -79,6 +79,14 @@ else
     skip "make test (golden)" "data/edgeface_xs_fp32.bin missing"
 fi
 
+if [[ -f data/edgeface_xs_fp32.bin && -f weights/yunet_fp32.bin ]]; then
+    run "make mac-test"              make mac-test
+elif [[ -f data/edgeface_xs_fp32.bin ]]; then
+    run "make mac-test (embed-only)" make mac-test
+else
+    skip "make mac-test" "weights missing"
+fi
+
 # ---------------------------------------------------------------------------
 hdr "External dependency audit (default build)"
 if [[ "$OS" = "Darwin" ]]; then
@@ -86,6 +94,97 @@ if [[ "$OS" = "Darwin" ]]; then
         bash -c '! otool -L facex-cli | tail -n +2 | grep -vqE "/usr/lib/libSystem|/System/Library"'
     run "libfacex.a is self-contained" \
         bash -c 'test "$(ar t libfacex.a | grep -cE "\.o$")" -ge 5'
+fi
+
+# ---------------------------------------------------------------------------
+hdr "Apple Silicon variants (Mac perf paths)"
+if [[ "$ARCH" = "arm64" && "$OS" = "Darwin" ]]; then
+    # SME=1 build (compile-only validation)
+    run "make clean"                 bash -c 'make clean >/dev/null 2>&1 || true; true'
+    run "make SME=1"                 make SME=1
+    run "fmopa is in libfacex.a" \
+        bash -c 'ar x libfacex.a transformer_ops_sme.o && \
+                 otool -tv transformer_ops_sme.o | grep -q fmopa && rm -f transformer_ops_sme.o'
+    run "rdvl NOT in transformer_ops.o (M1-M3 safe)" \
+        bash -c 'ar x libfacex.a transformer_ops.o && \
+                 ! otool -tv transformer_ops.o | grep -qE "rdvl|smstart|fmopa" && \
+                 rm -f transformer_ops.o'
+    run "mac-test still passes with SME-built lib" \
+        bash -c 'make mac-test 2>&1 | grep -q "PASS: macOS arm64 smoke test"'
+
+    # ACCELERATE=1 build — Apple Accelerate / AMX path
+    run "make clean"                 bash -c 'make clean >/dev/null 2>&1 || true; true'
+    run "make ACCELERATE=1"          make ACCELERATE=1
+    run "Accelerate symbol present in libfacex.a" \
+        bash -c 'ar x libfacex.a backend_accelerate.o 2>/dev/null && \
+                 nm backend_accelerate.o | grep -q matmul_fp32_packed_accelerate && \
+                 rm -f backend_accelerate.o'
+    run "facex-cli links Accelerate.framework" \
+        bash -c 'otool -L facex-cli | grep -q Accelerate.framework'
+    run "mac-test passes with Accelerate" \
+        bash -c 'make ACCELERATE=1 mac-test 2>&1 | grep -q "PASS: macOS arm64 smoke test"'
+
+    # SME=1 ACCELERATE=1 combo
+    run "make clean"                 bash -c 'make clean >/dev/null 2>&1 || true; true'
+    run "make SME=1 ACCELERATE=1"    make SME=1 ACCELERATE=1
+    run "mac-test passes with SME+Accelerate" \
+        bash -c 'make SME=1 ACCELERATE=1 mac-test 2>&1 | grep -q "PASS: macOS arm64 smoke test"'
+
+    # COREML=1 build — Core ML / ANE bridge (compile + link only;
+    # runtime ANE dispatch needs an .mlpackage we can't produce here).
+    run "make clean"                 bash -c 'make clean >/dev/null 2>&1 || true; true'
+    run "make COREML=1"              make COREML=1
+    run "Core ML symbols present in libfacex.a" \
+        bash -c 'ar x libfacex.a backend_coreml.o 2>/dev/null && \
+                 nm backend_coreml.o | grep -q facex_coreml_init && \
+                 rm -f backend_coreml.o'
+    run "facex-cli links CoreML.framework" \
+        bash -c 'otool -L facex-cli | grep -q CoreML.framework'
+    run "facex_coreml_init handles missing .mlpackage gracefully" \
+        bash -c '
+            cat > /tmp/_cm_smoke.c <<EOF
+#include "facex_coreml.h"
+#include <stdio.h>
+int main(void){
+    FaceXCoreMLOptions o = {0};
+    FaceXCoreML* fx = facex_coreml_init("/tmp/__nope__.mlpackage", &o);
+    return fx ? 1 : 0;
+}
+EOF
+            cc -O2 -Iinclude -DFACEX_HAVE_COREML -o /tmp/_cm_smoke /tmp/_cm_smoke.c \
+               -L. -lfacex -framework CoreML -framework Foundation -lm -lpthread &&
+            /tmp/_cm_smoke 2>/dev/null
+            rc=$?
+            rm -f /tmp/_cm_smoke /tmp/_cm_smoke.c
+            exit $rc'
+    run "tools/export_coreml.py parses + --help" \
+        bash -c 'python3 tools/export_coreml.py --help >/dev/null'
+
+    # Universal binary build (arm64 + x86_64)
+    run "make clean"                 bash -c 'make clean >/dev/null 2>&1 || true; true'
+    run "make mac-universal"         make mac-universal
+    run "libfacex-universal.a is fat" \
+        bash -c 'file libfacex-universal.a | grep -q "universal binary"'
+    run "universal contains arm64" \
+        bash -c 'lipo -info libfacex-universal.a | grep -q arm64'
+    run "universal contains x86_64" \
+        bash -c 'lipo -info libfacex-universal.a | grep -q x86_64'
+    run "arm64 slice has NEON code" \
+        bash -c 'lipo -thin arm64 libfacex-universal.a -output /tmp/_a.a && \
+                 ar x /tmp/_a.a transformer_ops.o && \
+                 [ "$(otool -tv transformer_ops.o | grep -cE "(fmla|fmul)")" -gt 100 ] && \
+                 rm -f /tmp/_a.a transformer_ops.o'
+    run "x86_64 slice has AVX2 code" \
+        bash -c 'lipo -thin x86_64 libfacex-universal.a -output /tmp/_x.a && \
+                 ar x /tmp/_x.a transformer_ops.o && \
+                 [ "$(otool -tv transformer_ops.o | grep -cE "(vfmadd|vmovups)")" -gt 100 ] && \
+                 rm -f /tmp/_x.a transformer_ops.o'
+
+    # Restore default build
+    run "make clean"                 bash -c 'make clean >/dev/null 2>&1 || true; true'
+    run "make (default restore)"     make
+else
+    skip "Mac perf variants" "not on Apple Silicon"
 fi
 
 # ---------------------------------------------------------------------------

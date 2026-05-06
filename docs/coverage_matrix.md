@@ -31,6 +31,19 @@ Each topic commit (Bench / Mac / i.MX / ESP32) appends its own rows.
 | `make` — Linux aarch64 (NEON) | 🧪 (Makefile path exists) | n/a | — | — | — | Same C as mac-m2; no Linux ARM box here |
 | WASM (Emscripten) | 🧪 (upstream) | upstream | upstream demo | upstream demo | — | `wasm/` artifacts pre-existed |
 
+## Apple Silicon — beyond NEON
+
+| Target / build flag | Compiles | Static analysis | Smoke test | E2E test | Tested on | Notes |
+|---|---|---|---|---|---|---|
+| `make mac-test` (smoke + latency stats) | ✅ | ✅ | ✅ | ✅ — embed median ~4.6 ms, e2e ~9 ms, bbox `[68,115→114,151]` score 0.835 | mac-m2 | Reports compiled-in vs runtime-active backends |
+| `make ACCELERATE=1` — Apple AMX via cblas_sgemm | ✅ | ✅ `nm` shows `matmul_fp32_packed_accelerate`; `otool -L` shows `Accelerate.framework` linked | ✅ self-check on init: cblas_sgemm vs scalar within 1e-4 relative | ✅ `mac-test`: 3.5 ms/embed (-22%), e2e 7.5 ms (-13%); embedding byte-equivalent | mac-m2 | Falls back to NEON for tiny shapes |
+| `make SME=1` — Apple Silicon arm64 + SME (M4+) | ✅ | ✅ `fmopa` present in `transformer_ops_sme.o`; `rdvl/smstart/fmopa` absent from `transformer_ops.o` (M1-M3 safe) | ✅ `mac-test` byte-identical on M2 (SME inert because `facex_has_sme()=0`) | 🚫 needs M4 hardware | mac-m2 (SME path inert) | Self-check at first matmul disables SME on output divergence |
+| `make SME=1 ACCELERATE=1` — both flags combined | ✅ | ✅ both libs link | ✅ | ✅ `mac-test` passes | mac-m2 | Accelerate wins per dispatch order; SME path inert on M2 |
+| `make COREML=1` — Core ML / ANE bridge | ✅ | ✅ `nm` shows `facex_coreml_init/_embed/_free`; `otool -L` shows `CoreML.framework` linked | ✅ missing-`.mlpackage` smoke: returns NULL with clear stderr message, no crash | 🚫 needs real `.mlpackage` produced by tools/export_coreml.py from EdgeFace ONNX | mac-m2 (compile + link + error path only) | Obj-C bridge (`src/backend_coreml.m`); ARC-managed; supports `compute_units` hint |
+| `make mac-universal` — fat arm64 + x86_64 binary | ✅ | ✅ `file` reports "universal binary"; both slices present | ✅ arm64 slice has 293 NEON insts (fmla/fmul); x86_64 slice has 786 AVX insts (vfmadd/vmovups) | n/a (smoke runs against thin host build) | mac-m2 | 358 KB combined; built via cross-compile + `lipo -create` |
+| `tools/export_coreml.py` — ONNX → .mlpackage with INT8 palettization | ✅ | ✅ `--help` parses, AST validates | 🚫 needs ONNX EdgeFace export | — | mac-m2 (parses) | Calls `coremltools.convert(convert_to="mlprogram")` + `palettize_weights` for ANE INT8 |
+| `tests/test_mac.c` (smoke + latency) | ✅ | ✅ | ✅ | ✅ — backend reporting works across all flag combos | mac-m2 | Prints "compiled in" + "active at runtime" lines |
+
 ## Bench infrastructure
 
 | Tool | Compiles / runs | Tested | Notes |
