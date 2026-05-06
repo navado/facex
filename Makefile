@@ -110,7 +110,8 @@ SRCS = src/facex.c src/transformer_ops.c $(GEMM_SRC) $(THREADPOOL_SRC) $(SME_SRC
 
 .PHONY: all clean example lib cli encrypt test mac-test bench detect-lib \
         bench-camera bench-camera-debug bench-camera-profile \
-        mac-sme mac-universal mac-universal-arm64 mac-universal-x86_64
+        mac-sme mac-universal mac-universal-arm64 mac-universal-x86_64 \
+        imx-npu imx93 imx95 imx8mp
 
 all: lib cli detect-lib
 
@@ -280,6 +281,89 @@ libdetect.a: src/detect.c include/detect.h
 	@echo "Built libdetect.a"
 
 clean:
-	rm -f libfacex.a libfacex-arm64.a libfacex-x86_64.a libfacex-universal.a libdetect.a \
+	rm -f libfacex.a libfacex-arm64.a libfacex-x86_64.a libfacex-universal.a \
+	      libdetect.a libfacex_npu.so libfacex_npu.dylib \
 	      facex-cli$(EXT) facex-example$(EXT) facex-encrypt$(EXT) \
-	      golden-test$(EXT) facex-mac-test$(EXT) facex-bench$(EXT) facex-camera-bench *.o
+	      golden-test$(EXT) facex-mac-test$(EXT) facex-bench$(EXT) facex-camera-bench \
+	      imx_npu_compile_test *.o
+
+# ---------------------------------------------------------------------------
+# i.MX NPU build (TFLite C API + runtime-loaded delegate).
+#
+#   make imx-npu                    # host-side dev build (links host libtensorflowlite_c)
+#   make imx93   SDK=/opt/imx-yocto # cross-compile for i.MX 93   (Cortex-A55 + Ethos-U65)
+#   make imx95   SDK=/opt/imx-yocto # cross-compile for i.MX 95   (same artifact)
+#   make imx8mp  SDK=/opt/imx-yocto # cross-compile for i.MX 8M Plus (VxDelegate / VIP9000)
+#
+# SDK= points at an NXP Yocto toolchain root. The `environment-setup-…`
+# script there sets CC, CFLAGS, LDFLAGS — we just source it.
+#
+# Output: libfacex_npu.{so,dylib} — a TFLite-backed engine that auto-selects
+# NXP VxDelegate → Arm Ethos-U external delegate → XNNPACK fallback at
+# runtime. See docs/imx_npu.md.
+# ---------------------------------------------------------------------------
+
+# Optional build inputs:
+TFLITE_INCLUDE ?=
+TFLITE_LIB     ?=
+
+NPU_CFLAGS = -O3 -fPIC -DFACEX_BACKEND_TFLITE -Iinclude
+ifneq ($(TFLITE_INCLUDE),)
+  NPU_CFLAGS += -I$(TFLITE_INCLUDE)
+endif
+NPU_LDFLAGS = -ltensorflowlite_c -ldl -lm -lpthread
+ifneq ($(TFLITE_LIB),)
+  NPU_LDFLAGS := -L$(TFLITE_LIB) $(NPU_LDFLAGS)
+endif
+
+ifeq ($(UNAME_S),Darwin)
+  NPU_LIB = libfacex_npu.dylib
+  NPU_LDFLAGS += -Wl,-undefined,dynamic_lookup
+else
+  NPU_LIB = libfacex_npu.so
+endif
+
+imx-npu: $(NPU_LIB)
+
+$(NPU_LIB): src/backend_tflite.c include/facex_npu.h include/facex_backend.h
+	@command -v $(CC) >/dev/null || { echo "no compiler"; exit 1; }
+	$(CC) $(NPU_CFLAGS) -shared -o $@ src/backend_tflite.c $(NPU_LDFLAGS)
+	@echo "Built $@"
+
+# i.MX 93 — Cortex-A55 + Ethos-U65, prefers Arm Ethos-U external delegate.
+imx93:
+	@if [ -z "$(SDK)" ]; then echo "set SDK=/path/to/imx-yocto-sdk"; exit 1; fi
+	@echo "sourcing $(SDK)/environment-setup-aarch64-poky-linux"
+	@bash -c '. $(SDK)/environment-setup-aarch64-poky-linux && \
+	          $$CC -O3 -fPIC -DFACEX_BACKEND_TFLITE -Iinclude \
+	          -mcpu=cortex-a55 -march=armv8.2-a+dotprod+fp16 \
+	          -shared -o libfacex_npu.so src/backend_tflite.c \
+	          -ltensorflowlite_c -ldl -lm -lpthread'
+	@echo "Built libfacex_npu.so for i.MX 93"
+
+# i.MX 95 — same A55 + Ethos-U65, same artifact as i.MX 93.
+imx95:
+	@if [ -z "$(SDK)" ]; then echo "set SDK=/path/to/imx-yocto-sdk"; exit 1; fi
+	@bash -c '. $(SDK)/environment-setup-aarch64-poky-linux && \
+	          $$CC -O3 -fPIC -DFACEX_BACKEND_TFLITE -Iinclude \
+	          -mcpu=cortex-a55 -march=armv8.2-a+dotprod+fp16 \
+	          -shared -o libfacex_npu.so src/backend_tflite.c \
+	          -ltensorflowlite_c -ldl -lm -lpthread'
+	@echo "Built libfacex_npu.so for i.MX 95"
+
+# i.MX 8M Plus — Cortex-A53 + VIP9000 NPU via NXP VxDelegate.
+imx8mp:
+	@if [ -z "$(SDK)" ]; then echo "set SDK=/path/to/imx-yocto-sdk"; exit 1; fi
+	@bash -c '. $(SDK)/environment-setup-aarch64-poky-linux && \
+	          $$CC -O3 -fPIC -DFACEX_BACKEND_TFLITE -Iinclude \
+	          -mcpu=cortex-a53 -march=armv8-a+crc \
+	          -shared -o libfacex_npu.so src/backend_tflite.c \
+	          -ltensorflowlite_c -ldl -lm -lpthread'
+	@echo "Built libfacex_npu.so for i.MX 8M Plus"
+
+# Compile-only smoke test for the NPU API surface (runs anywhere TFLite
+# headers/libs are installed; doesn't need an actual NPU device).
+imx_npu_compile_test: tests/test_imx_npu_compile.c $(NPU_LIB)
+	$(CC) $(NPU_CFLAGS) -o $@ tests/test_imx_npu_compile.c \
+	    -L. -lfacex_npu $(NPU_LDFLAGS)
+	@echo "Built imx_npu_compile_test (run with: ./imx_npu_compile_test [embed.tflite [detect.tflite]])"

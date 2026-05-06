@@ -15,6 +15,7 @@ facex-mac-test
 facex-bench
 facex-camera-bench
 golden-test
+imx_npu_compile_test
 
 # Local toolchains and datasets — NOT committed
 emsdk/

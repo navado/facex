@@ -204,6 +204,55 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+hdr "i.MX NPU compile checks"
+# We don't have libtensorflowlite_c locally; use minimal stub headers so
+# the syntax check works on any host. Real builds against a vendor SDK
+# happen via `make imx93 SDK=...` etc.
+STUB_DIR="$(mktemp -d -t facex_tflite_stub.XXXX)"
+mkdir -p "$STUB_DIR/tensorflow/lite/c"
+cat > "$STUB_DIR/tensorflow/lite/c/c_api.h" <<'EOF'
+#ifndef TFL_STUB_H
+#define TFL_STUB_H
+#include <stddef.h>
+#include <stdint.h>
+typedef struct TfLiteModel TfLiteModel;
+typedef struct TfLiteInterpreter TfLiteInterpreter;
+typedef struct TfLiteInterpreterOptions TfLiteInterpreterOptions;
+typedef struct TfLiteTensor TfLiteTensor;
+typedef struct TfLiteDelegate TfLiteDelegate;
+typedef enum { kTfLiteOk=0, kTfLiteError=1 } TfLiteStatus;
+typedef enum { kTfLiteNoType=0, kTfLiteFloat32=1, kTfLiteInt8=9 } TfLiteType;
+typedef struct { float scale; int32_t zero_point; } TfLiteQuantizationParams;
+TfLiteModel* TfLiteModelCreateFromFile(const char*);
+void TfLiteModelDelete(TfLiteModel*);
+TfLiteInterpreterOptions* TfLiteInterpreterOptionsCreate(void);
+void TfLiteInterpreterOptionsDelete(TfLiteInterpreterOptions*);
+void TfLiteInterpreterOptionsSetNumThreads(TfLiteInterpreterOptions*,int);
+void TfLiteInterpreterOptionsAddDelegate(TfLiteInterpreterOptions*,TfLiteDelegate*);
+TfLiteInterpreter* TfLiteInterpreterCreate(const TfLiteModel*,const TfLiteInterpreterOptions*);
+void TfLiteInterpreterDelete(TfLiteInterpreter*);
+TfLiteStatus TfLiteInterpreterAllocateTensors(TfLiteInterpreter*);
+TfLiteStatus TfLiteInterpreterInvoke(TfLiteInterpreter*);
+TfLiteTensor* TfLiteInterpreterGetInputTensor(const TfLiteInterpreter*,int32_t);
+const TfLiteTensor* TfLiteInterpreterGetOutputTensor(const TfLiteInterpreter*,int32_t);
+TfLiteType TfLiteTensorType(const TfLiteTensor*);
+void* TfLiteTensorData(const TfLiteTensor*);
+TfLiteQuantizationParams TfLiteTensorQuantizationParams(const TfLiteTensor*);
+#endif
+EOF
+cat > "$STUB_DIR/tensorflow/lite/c/c_api_experimental.h" <<'EOF'
+#ifndef TFL_STUB_EXP_H
+#define TFL_STUB_EXP_H
+#include "c_api.h"
+#endif
+EOF
+run "src/backend_tflite.c syntax-check" \
+    clang -fsyntax-only -DFACEX_BACKEND_TFLITE -Iinclude -I"$STUB_DIR" src/backend_tflite.c
+run "tests/test_imx_npu_compile.c syntax-check" \
+    clang -fsyntax-only -Iinclude -I"$STUB_DIR" tests/test_imx_npu_compile.c
+rm -rf "$STUB_DIR"
+
+# ---------------------------------------------------------------------------
 hdr "Camera benchmark"
 if [[ "$OS" = "Darwin" && "$SKIP_CAMERA" = 0 ]]; then
     run "make bench-camera"          make bench-camera

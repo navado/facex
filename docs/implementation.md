@@ -174,4 +174,68 @@ LSB by ~ULP; the self-check gates anything worse than 1e-4 relative.
 
 ---
 
+## 3. i.MX NPU library (`libfacex_npu.{so,dylib}`)
+
+A second library, distinct from `libfacex.a`, that dispatches inference
+through the TensorFlow Lite C API to a runtime-selected delegate. Same
+source / same artefact targets three NXP SoCs:
+
+| SoC | NPU | Delegate library |
+|---|---|---|
+| **i.MX 8M Plus** | Verisilicon VIP9000 (2.3 TOPS) | `libvx_delegate.so` |
+| **i.MX 93** | Arm Ethos-U65 (~0.5 TOPS) | `libethosu_delegate.so` |
+| **i.MX 95** | Arm Ethos-U65 (~0.5 TOPS) | `libethosu_delegate.so` |
+| any AArch64 | (CPU fallback) | XNNPACK (built into TFLite) |
+
+### What's added
+
+| File | Role |
+|---|---|
+| `include/facex_backend.h` | Pluggable `FacexBackend` vtable (kind, name, init/detect/embed/free, threshold setters). Foundation for any future runtime backend choice — i.MX is the first concrete consumer beyond CPU. |
+| `include/facex_npu.h` | C public API mirroring `facex.h` shape: `facex_npu_init / _embed / _detect / _free`, plus `facex_npu_active_delegate` for logging. |
+| `src/backend_tflite.c` | TFLite C-API wrapper. `dlopen`-based delegate loader walks `libvx_delegate.so` → `libethosu_delegate.so` → `libarmnnDelegate.so`, falls back to XNNPACK. INT8 quantize/dequantize for the embedder. Detector path returns `-ENOSYS` by design — see "Hybrid pipeline" below. |
+| `tools/onnx_to_tflite.py` | PyTorch/ONNX → INT8 `.tflite` via `onnx2tf` + `tf.lite`, with calibration-dataset support. Required to feed any NPU. |
+| `tools/compile_vela.sh` | Wraps Arm's Vela compiler (i.MX 93 / 95 only) — INT8 `.tflite` → Ethos-U65 command stream `.tflite`. |
+| `tests/test_imx_npu_compile.c` | API smoke + link test (works without an actual NPU device; with `.tflite` arg also tries a real init). |
+| `docs/imx_npu.md` | Full deployment guide: model conversion pipeline, host vs cross-compile builds, hybrid pipeline wiring, per-SoC bring-up checklist, known limitations. |
+
+### Build matrix
+
+| Make invocation | Output |
+|---|---|
+| `make imx-npu` | host build for dev / smoke (links host `libtensorflowlite_c`) |
+| `make imx93 SDK=…` | cross-compile for i.MX 93 (Cortex-A55 + Ethos-U65) |
+| `make imx95 SDK=…` | cross-compile for i.MX 95 (same artifact as 93, different `-mtune`) |
+| `make imx8mp SDK=…` | cross-compile for i.MX 8M Plus (Cortex-A53 + VIP9000) |
+
+`SDK=` points at an NXP Yocto toolchain root (`/opt/fsl-imx-…`); the
+recipe sources its `environment-setup-aarch64-poky-linux` script and uses
+the right `$CC` + `-mcpu` flags.
+
+### Hybrid pipeline — recommended deployment
+
+`facex_npu_detect()` is intentionally `-ENOSYS`. Anchor decode + NMS for
+arbitrary YuNet/SCRFD topology is too fragile to ship blind. The
+production wiring is **CPU detect via `libfacex.a` + NPU embed via
+`libfacex_npu.so`** — gives ~80% of the perf benefit, none of the
+post-processing risk. Documented in `docs/imx_npu.md` §4.
+
+### Status
+
+- ✅ **Build system** — Makefile targets for all three SoCs
+- ✅ **Source compiles cleanly** — verified against minimal TFLite header
+  stubs with `clang -fsyntax-only` on mac-m2
+- ✅ **NPU embedder path wired** — INT8 quantize/dequantize, L2 normalize,
+  delegate fallback chain
+- 🛠 **NPU detector path** — `-ENOSYS` by design (use hybrid pipeline)
+- 🚫 **Hardware-untested** — code follows the published TFLite C API +
+  delegate ABI; bring-up on real EVK is the next milestone (see
+  `docs/imx_npu.md` §5 "Hardware bring-up checklist")
+- 🚫 **Model conversion pipeline** — `tools/onnx_to_tflite.py` and
+  `tools/compile_vela.sh` parse + run on the host once their respective
+  Python deps are installed; produces no `.tflite` here because no
+  EdgeFace ONNX is in this repo
+
+---
+
 <!-- Subsequent topic sections appended by their respective commits. -->

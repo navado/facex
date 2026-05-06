@@ -44,6 +44,20 @@ Each topic commit (Bench / Mac / i.MX / ESP32) appends its own rows.
 | `tools/export_coreml.py` — ONNX → .mlpackage with INT8 palettization | ✅ | ✅ `--help` parses, AST validates | 🚫 needs ONNX EdgeFace export | — | mac-m2 (parses) | Calls `coremltools.convert(convert_to="mlprogram")` + `palettize_weights` for ANE INT8 |
 | `tests/test_mac.c` (smoke + latency) | ✅ | ✅ | ✅ | ✅ — backend reporting works across all flag combos | mac-m2 | Prints "compiled in" + "active at runtime" lines |
 
+## NPU library (`libfacex_npu.{so,dylib}`)
+
+| Target / build flag | Compiles | Static analysis | Smoke test | E2E test | Tested on | Notes |
+|---|---|---|---|---|---|---|
+| `make imx-npu` — host TFLite + XNNPACK fallback | 🚫 (no libtensorflowlite_c on dev box) | ✅ `clang -fsyntax-only` against header stub | — | — | mac-m2 (syntax-only) | Real build needs TFLite C lib + headers |
+| `make imx93 SDK=…` — A55 + Ethos-U65 (Vela) | 🚫 (no NXP SDK here) | 🧪 same syntax check | — | — | — | Compile-time path verified; runtime needs `/dev/ethosu0` |
+| `make imx95 SDK=…` — A55 + Ethos-U65 | 🚫 (no NXP SDK here) | 🧪 same syntax check | — | — | — | Same artifact as imx93, different `-mtune` |
+| `make imx8mp SDK=…` — A53 + VIP9000 (VxDelegate) | 🚫 (no NXP SDK here) | 🧪 same syntax check | — | — | — | Delegate selected at runtime via `dlopen` |
+| `imx_npu_compile_test` — API smoke | ✅ syntax | ✅ | — | — | mac-m2 (syntax) | Runs once TFLite is on the host; checks NULL handling, dtype branches |
+| **NPU embedder path** | — | ✅ | — | 🚫 needs board | — | Fully wired (INT8 quantize/dequantize + L2 norm) |
+| **NPU detector path** | — | — | — | — | — | Returns `-ENOSYS` by design — use hybrid pipeline |
+| `tools/onnx_to_tflite.py` (offline) | ✅ syntax | 🚫 (needs `onnx2tf` + `tensorflow`) | — | — | mac-m2 (parses) | Offline NPU model conversion |
+| `tools/compile_vela.sh` (offline) | ✅ syntax | 🚫 (needs `ethos-u-vela`) | — | — | mac-m2 (parses) | i.MX 93/95 Vela compilation |
+
 ## Bench infrastructure
 
 | Tool | Compiles / runs | Tested | Notes |

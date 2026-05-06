@@ -1,0 +1,256 @@
+# FaceX on i.MX NPU
+
+A second build of FaceX (`libfacex_npu.so`) that dispatches inference
+through the TensorFlow Lite C API. At runtime it picks the best available
+delegate:
+
+| SoC | Delegate | Library | NPU |
+|---|---|---|---|
+| **i.MX 8M Plus** | NXP VxDelegate | `libvx_delegate.so` | Verisilicon VIP9000, 2.3 TOPS |
+| **i.MX 93** | Arm Ethos-U external delegate | `libethosu_delegate.so` | Arm Ethos-U65, ~0.5 TOPS |
+| **i.MX 95** | Arm Ethos-U external delegate | `libethosu_delegate.so` | Arm Ethos-U65, ~0.5 TOPS |
+| any AArch64 | XNNPACK (built-in) | (TFLite itself) | CPU only — slower |
+
+Same C API (`facex_npu.h`), same `.tflite` artefacts (compiled offline),
+same `libfacex_npu.so` source — the only thing that changes per board is
+which delegate the runtime finds first.
+
+> **Status:** the **embedder** path is fully wired. The **detector** path
+> in `facex_npu_detect()` returns `-ENOSYS` today; the recommended
+> deployment is the **hybrid pipeline** — CPU detector via `libfacex.a`
+> + NPU embedder via `libfacex_npu.so`. See "Hybrid pipeline" below for
+> the wiring.
+
+---
+
+## 1. Offline model conversion (one-time)
+
+The NPU eats `.tflite`, not the FaceX `.bin` weights. Conversion runs once,
+on a beefy host machine, and produces artefacts you ship to the board.
+
+### Prereqs
+
+```bash
+pip install onnx2tf onnxruntime tensorflow numpy Pillow
+pip install ethos-u-vela    # only for i.MX 93 / 95
+```
+
+Vela needs Python ≥ 3.10 and works best on Linux; it also runs on macOS
+arm64 once the wheel is installed.
+
+### Step 1: PyTorch → ONNX
+
+The repo doesn't ship the EdgeFace PyTorch model — get it from the upstream
+EdgeFace repo and export with the standard `torch.onnx.export(model, dummy,
+"edgeface_xs.onnx", input_names=["input"], output_names=["embedding"],
+opset_version=13)`. YuNet ships as ONNX in `weights/yunet_2023mar.onnx` —
+no export needed.
+
+### Step 2: ONNX → INT8 TFLite
+
+```bash
+python3 tools/onnx_to_tflite.py edgeface_xs.onnx weights/edgeface_xs_int8.tflite \
+    --calib-dir calib_faces/
+
+python3 tools/onnx_to_tflite.py weights/yunet_2023mar.onnx weights/yunet_int8.tflite \
+    --calib-dir calib_faces/ --input-hw 160,160
+```
+
+`calib_faces/` should hold ~100 representative face crops (any size, any
+format — they get resized + normalised inside the script). **Skipping
+calibration is allowed but produces poor INT8 accuracy** — always provide
+real images for production.
+
+### Step 3 (i.MX 93 / 95 only): TFLite → Vela command stream
+
+```bash
+tools/compile_vela.sh weights/edgeface_xs_int8.tflite
+tools/compile_vela.sh weights/yunet_int8.tflite
+```
+
+Outputs `weights/edgeface_xs_int8_vela.tflite` etc. — these are still
+`.tflite` files but they contain the Ethos-U custom operator. Loading one
+through TFLite + the Arm Ethos-U external delegate dispatches the heavy
+ops to the NPU; anything Vela rejected is left on the CPU side of the
+graph and runs in TFLite XNNPACK as usual.
+
+The script prints op coverage from Vela's summary CSV — anything in the
+"CPU" column is a layer that fell back. Common culprits: unsupported
+activations (`GELU`, `swish`), dynamic shapes, ops that need FP32. Decompose
+or replace, re-export, re-Vela.
+
+i.MX 8M Plus skips this step — VxDelegate ingests the plain INT8 `.tflite`
+directly.
+
+---
+
+## 2. Building `libfacex_npu.so`
+
+### On the host (dev / smoke tests)
+
+Useful for syntax checks, the API smoke test, and running with the XNNPACK
+fallback. Needs the TensorFlow Lite C library installed where your linker
+can find it.
+
+```bash
+make imx-npu \
+    TFLITE_INCLUDE=/opt/tflite/include \
+    TFLITE_LIB=/opt/tflite/lib
+```
+
+If you don't have `libtensorflowlite_c.so` locally, build it from source
+once (~30 min) following the Bazel instructions in
+`tensorflow/lite/c/BUILD`, or grab the Python wheel that ships it
+(`pip install tflite-runtime` extracts a usable `.so`, but C headers are
+not included — you'll need to vendor `tensorflow/lite/c/c_api.h` from the
+TF source tree).
+
+### Cross-compiling for an i.MX board
+
+Source the NXP Yocto SDK once (or pass it via `SDK=`):
+
+```bash
+make imx93   SDK=/opt/fsl-imx-xwayland/6.6-scarthgap
+make imx95   SDK=/opt/fsl-imx-xwayland/6.6-scarthgap
+make imx8mp  SDK=/opt/fsl-imx-xwayland/6.6-scarthgap
+```
+
+The Makefile sources the BSP's `environment-setup-aarch64-poky-linux`
+script and hands `$CC` the right `-mcpu` flags for the target. NXP's
+BSP already ships `libtensorflowlite_c.so` and the appropriate delegate
+plugins under `/usr/lib/`, so the resulting `libfacex_npu.so` has
+everything it needs at runtime on the device.
+
+The three targets produce the same source artifact — the only differences
+are the `-mcpu` tuning flags and which delegate the runtime ends up
+choosing on each board.
+
+---
+
+## 3. API at a glance
+
+```c
+#include "facex_npu.h"
+
+FaceXNpuOptions opts = { .verbose = 1, .num_threads = 4 };
+FaceXNpu* fx = facex_npu_init("edgeface_xs_int8_vela.tflite",
+                              NULL, /* detect — see hybrid pipeline */
+                              &opts);
+if (!fx) { /* check stderr — model missing, delegate failed, etc. */ }
+
+printf("dispatch: %s\n", facex_npu_active_delegate(fx)); /* "ethos-u" / "vx" / "xnnpack" */
+
+float emb[512];
+facex_npu_embed(fx, aligned_face_112x112, emb);   /* float32 HWC, [-1,1] */
+
+float sim = facex_npu_similarity(emb, reference_emb);
+```
+
+Full API in `include/facex_npu.h`. Mirrors `facex.h` so callers can
+swap CPU and NPU backends at compile time.
+
+---
+
+## 4. Hybrid pipeline (recommended deployment)
+
+The detector is small and CPU-cheap (~5 ms on A55 NEON via the existing
+`libfacex.a`), the embedder is what benefits from NPU offload. Wire them
+together at the application layer:
+
+```c
+#include "facex.h"        /* CPU detector */
+#include "facex_npu.h"    /* NPU embedder */
+
+/* Init both. CPU side without an embedder (passes NULL). */
+FaceX*    cpu = facex_init(NULL, "weights/yunet_fp32.bin", NULL);
+FaceXNpu* npu = facex_npu_init("weights/edgeface_xs_int8_vela.tflite",
+                               NULL, NULL);
+
+/* Per frame: detect on CPU, align on CPU, embed on NPU. */
+DetectFace dets[10];
+int n = facex_detect_only(cpu, rgb, w, h, dets, 10); /* TODO: helper to skip embed */
+for (int i = 0; i < n; i++) {
+    float aligned[112*112*3];
+    align_face(rgb, w, h, dets[i].kps, aligned);    /* from libfacex */
+    float emb[512];
+    facex_npu_embed(npu, aligned, emb);
+    /* compare emb against your gallery */
+}
+```
+
+(`facex_detect_only` is a planned helper — for now use `facex_detect()`
+and ignore the embedding it writes; it's a few microseconds wasted, not a
+correctness issue.)
+
+This is the layout the i.MX 93/95 sprint (B5 in the embedded port plan)
+formalises. On i.MX 8M Plus the same wiring works — just a different
+delegate gets selected at init time.
+
+---
+
+## 5. Testing
+
+### Compile + link smoke (host)
+
+```bash
+make imx_npu_compile_test \
+    TFLITE_INCLUDE=/opt/tflite/include \
+    TFLITE_LIB=/opt/tflite/lib
+
+./imx_npu_compile_test                            # API surface only, no model
+./imx_npu_compile_test edgeface_xs_int8.tflite    # try a real init
+```
+
+The test is short on purpose: it validates `facex_npu_init` returns NULL
+on bad input, that `facex_npu_active_delegate` reports a sensible value,
+and that one `facex_npu_embed` call completes with finite output.
+
+### Hardware bring-up checklist (i.MX 93 / 95)
+
+When you first plug in an EVK:
+
+1. `lsmod | grep ethosu` — kernel driver loaded?
+2. `ls /dev/ethosu0` — userspace device node present?
+3. `ldconfig -p | grep ethosu_delegate` — Arm Ethos-U external delegate library installed?
+4. `vela --version` available on the host you used for the model conversion?
+5. `./imx_npu_compile_test embed_vela.tflite` — does it print `active delegate: ethos-u`? If it prints `xnnpack`, the delegate didn't load — turn on `verbose=1` to see why (usually `dlopen` errors).
+
+### i.MX 8M Plus
+
+Replace `ethosu` / `ethos-u-delegate` with `galcore` / `vx_delegate` in
+the checks above. The expected `active delegate` print is `vx`.
+
+---
+
+## 6. Known limitations
+
+- **Detector path** — `facex_npu_detect` returns `-ENOSYS`. Use the hybrid
+  pipeline above. Direct NPU detection requires a model-specific anchor
+  decoder which we ship in `src/detect.c` (CPU side) but not in the NPU
+  backend.
+- **Hardware-untested** — the NPU code follows the published TFLite C API
+  + delegate ABI. Compile is verified; runtime correctness on a real EVK
+  is the next milestone — see the bring-up checklist in §5.
+- **Vela op coverage** — `LayerNorm` and `GELU` aren't native Ethos-U65
+  operators. Vela either decomposes them (slow but works) or kicks them
+  to CPU. A model rewrite that uses `BatchNorm` + `ReLU6`-friendly
+  activations would maximise NPU residency; until that lands, expect a
+  few layers to run on the A55 cores.
+- **Embedding sign convention** — the NPU backend always L2-normalises the
+  output, regardless of whether the source `.tflite` ends with an L2 op.
+  This makes cosine similarity behave identically to the CPU backend
+  (`facex_similarity`).
+
+---
+
+## 7. See also
+
+- `include/facex_backend.h` — the pluggable backend vtable. Long-term,
+  CPU and NPU backends register through this; today they're separate APIs
+  for clarity.
+- `docs/implementation.md` — implementation details across all targets;
+  §3 covers this i.MX library, §1 covers the bench tooling that exercises
+  it on the host (XNNPACK fallback path).
+- `docs/coverage_matrix.md` — current build/test status per SoC.
+- `docs/mac.md` — Apple Silicon CPU build (NEON kernels). The same
+  `libfacex.a` is what drives the CPU half of the hybrid pipeline above.
