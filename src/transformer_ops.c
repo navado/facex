@@ -18,6 +18,11 @@
 #endif
 #endif
 
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include <arm_neon.h>
+#define FACEX_HAVE_NEON 1
+#endif
+
 /* ============ LayerNorm ============ */
 /* out[i] = gamma[i] * (x[i] - mean) / sqrt(var + eps) + beta[i] */
 void layer_norm_fp32(const float* x, int N, int C,
@@ -800,8 +805,93 @@ void matmul_fp32_packed(const float* A, const float* B_packed, float* C,
             }
         }
     }
+#elif defined(FACEX_HAVE_NEON)
+    /* AArch64 NEON: NR=8 (= 2× float32x4_t), MR=4 row tile.
+     * Mirrors the AVX2 layout. B is column-panel [ceil(N/8), K, 8]. */
+    const int NR = 8;
+    int n_panels = (N + NR - 1) / NR;
+    int m = 0;
+
+    for (; m + 4 <= M; m += 4) {
+        for (int p = 0; p < n_panels; p++) {
+            int n = p * NR;
+            const float* bp = B_packed + (size_t)p * K * NR;
+            float32x4_t c00 = vdupq_n_f32(0), c01 = vdupq_n_f32(0);
+            float32x4_t c10 = vdupq_n_f32(0), c11 = vdupq_n_f32(0);
+            float32x4_t c20 = vdupq_n_f32(0), c21 = vdupq_n_f32(0);
+            float32x4_t c30 = vdupq_n_f32(0), c31 = vdupq_n_f32(0);
+            for (int k = 0; k < K; k++) {
+                float32x4_t b0 = vld1q_f32(bp + k * NR);
+                float32x4_t b1 = vld1q_f32(bp + k * NR + 4);
+                float32x4_t a0 = vdupq_n_f32(A[(m + 0) * K + k]);
+                float32x4_t a1 = vdupq_n_f32(A[(m + 1) * K + k]);
+                float32x4_t a2 = vdupq_n_f32(A[(m + 2) * K + k]);
+                float32x4_t a3 = vdupq_n_f32(A[(m + 3) * K + k]);
+                c00 = vfmaq_f32(c00, a0, b0); c01 = vfmaq_f32(c01, a0, b1);
+                c10 = vfmaq_f32(c10, a1, b0); c11 = vfmaq_f32(c11, a1, b1);
+                c20 = vfmaq_f32(c20, a2, b0); c21 = vfmaq_f32(c21, a2, b1);
+                c30 = vfmaq_f32(c30, a3, b0); c31 = vfmaq_f32(c31, a3, b1);
+            }
+            if (n + NR <= N) {
+                vst1q_f32(C + (m+0)*N + n,     c00); vst1q_f32(C + (m+0)*N + n + 4, c01);
+                vst1q_f32(C + (m+1)*N + n,     c10); vst1q_f32(C + (m+1)*N + n + 4, c11);
+                vst1q_f32(C + (m+2)*N + n,     c20); vst1q_f32(C + (m+2)*N + n + 4, c21);
+                vst1q_f32(C + (m+3)*N + n,     c30); vst1q_f32(C + (m+3)*N + n + 4, c31);
+            } else {
+                /* Partial last panel — scalarize the tail store. */
+                float t[4][8];
+                vst1q_f32(t[0],     c00); vst1q_f32(t[0] + 4, c01);
+                vst1q_f32(t[1],     c10); vst1q_f32(t[1] + 4, c11);
+                vst1q_f32(t[2],     c20); vst1q_f32(t[2] + 4, c21);
+                vst1q_f32(t[3],     c30); vst1q_f32(t[3] + 4, c31);
+                int nr = N - n;
+                for (int r = 0; r < 4; r++)
+                    for (int j = 0; j < nr; j++)
+                        C[(m + r) * N + n + j] = t[r][j];
+            }
+        }
+    }
+    /* M tail — single-row NEON */
+    for (; m < M; m++) {
+        for (int p = 0; p < n_panels; p++) {
+            int n = p * NR;
+            const float* bp = B_packed + (size_t)p * K * NR;
+            float32x4_t c0 = vdupq_n_f32(0), c1 = vdupq_n_f32(0);
+            for (int k = 0; k < K; k++) {
+                float32x4_t a = vdupq_n_f32(A[m * K + k]);
+                c0 = vfmaq_f32(c0, a, vld1q_f32(bp + k * NR));
+                c1 = vfmaq_f32(c1, a, vld1q_f32(bp + k * NR + 4));
+            }
+            if (n + NR <= N) {
+                vst1q_f32(C + m * N + n,     c0);
+                vst1q_f32(C + m * N + n + 4, c1);
+            } else {
+                float t[8];
+                vst1q_f32(t,     c0); vst1q_f32(t + 4, c1);
+                int nr = N - n;
+                for (int j = 0; j < nr; j++) C[m * N + n + j] = t[j];
+            }
+        }
+    }
 #else
-    matmul_fp32(A, B_packed, C, M, K, N);
+    /* Scalar fallback: B is in column-panel format [ceil(N/NR), K, NR], NR=8. */
+    {
+        const int NR = 8;
+        int n_panels = (N + NR - 1) / NR;
+        memset(C, 0, (size_t)M * N * sizeof(float));
+        for (int m = 0; m < M; m++) {
+            for (int p = 0; p < n_panels; p++) {
+                int n_base = p * NR;
+                int nr = (n_base + NR <= N) ? NR : (N - n_base);
+                const float* bp = B_packed + (size_t)p * K * NR;
+                for (int k = 0; k < K; k++) {
+                    float a = A[(size_t)m * K + k];
+                    for (int j = 0; j < nr; j++)
+                        C[(size_t)m * N + n_base + j] += a * bp[k * NR + j];
+                }
+            }
+        }
+    }
 #endif
 }
 
@@ -892,9 +982,99 @@ void matmul_fp32_packed_bias(const float* A, const float* B_packed, const float*
             else{float t[8];_mm256_storeu_ps(t,c0);for(int j=0;j<N-n;j++)C[(size_t)m*N+n+j]=t[j];}
         }
     }
+#elif defined(FACEX_HAVE_NEON)
+    /* AArch64 NEON: NR=8, MR=4, with bias added at store time. */
+    const int NR = 8;
+    int n_panels = (N + NR - 1) / NR;
+    int m = 0;
+    for (; m + 4 <= M; m += 4) {
+        for (int p = 0; p < n_panels; p++) {
+            int n = p * NR;
+            const float* bp = B_packed + (size_t)p * K * NR;
+            float32x4_t c00 = vdupq_n_f32(0), c01 = vdupq_n_f32(0);
+            float32x4_t c10 = vdupq_n_f32(0), c11 = vdupq_n_f32(0);
+            float32x4_t c20 = vdupq_n_f32(0), c21 = vdupq_n_f32(0);
+            float32x4_t c30 = vdupq_n_f32(0), c31 = vdupq_n_f32(0);
+            for (int k = 0; k < K; k++) {
+                float32x4_t b0 = vld1q_f32(bp + k * NR);
+                float32x4_t b1 = vld1q_f32(bp + k * NR + 4);
+                float32x4_t a0 = vdupq_n_f32(A[(m + 0) * K + k]);
+                float32x4_t a1 = vdupq_n_f32(A[(m + 1) * K + k]);
+                float32x4_t a2 = vdupq_n_f32(A[(m + 2) * K + k]);
+                float32x4_t a3 = vdupq_n_f32(A[(m + 3) * K + k]);
+                c00 = vfmaq_f32(c00, a0, b0); c01 = vfmaq_f32(c01, a0, b1);
+                c10 = vfmaq_f32(c10, a1, b0); c11 = vfmaq_f32(c11, a1, b1);
+                c20 = vfmaq_f32(c20, a2, b0); c21 = vfmaq_f32(c21, a2, b1);
+                c30 = vfmaq_f32(c30, a3, b0); c31 = vfmaq_f32(c31, a3, b1);
+            }
+            float32x4_t bb0 = bias ? vld1q_f32(bias + n)     : vdupq_n_f32(0);
+            float32x4_t bb1 = bias ? vld1q_f32(bias + n + 4) : vdupq_n_f32(0);
+            c00 = vaddq_f32(c00, bb0); c01 = vaddq_f32(c01, bb1);
+            c10 = vaddq_f32(c10, bb0); c11 = vaddq_f32(c11, bb1);
+            c20 = vaddq_f32(c20, bb0); c21 = vaddq_f32(c21, bb1);
+            c30 = vaddq_f32(c30, bb0); c31 = vaddq_f32(c31, bb1);
+            if (n + NR <= N) {
+                vst1q_f32(C + (m+0)*N + n,     c00); vst1q_f32(C + (m+0)*N + n + 4, c01);
+                vst1q_f32(C + (m+1)*N + n,     c10); vst1q_f32(C + (m+1)*N + n + 4, c11);
+                vst1q_f32(C + (m+2)*N + n,     c20); vst1q_f32(C + (m+2)*N + n + 4, c21);
+                vst1q_f32(C + (m+3)*N + n,     c30); vst1q_f32(C + (m+3)*N + n + 4, c31);
+            } else {
+                float t[4][8];
+                vst1q_f32(t[0],     c00); vst1q_f32(t[0] + 4, c01);
+                vst1q_f32(t[1],     c10); vst1q_f32(t[1] + 4, c11);
+                vst1q_f32(t[2],     c20); vst1q_f32(t[2] + 4, c21);
+                vst1q_f32(t[3],     c30); vst1q_f32(t[3] + 4, c31);
+                int nr = N - n;
+                for (int r = 0; r < 4; r++)
+                    for (int j = 0; j < nr; j++)
+                        C[(m + r) * N + n + j] = t[r][j];
+            }
+        }
+    }
+    for (; m < M; m++) {
+        for (int p = 0; p < n_panels; p++) {
+            int n = p * NR;
+            const float* bp = B_packed + (size_t)p * K * NR;
+            float32x4_t c0 = vdupq_n_f32(0), c1 = vdupq_n_f32(0);
+            for (int k = 0; k < K; k++) {
+                float32x4_t a = vdupq_n_f32(A[m * K + k]);
+                c0 = vfmaq_f32(c0, a, vld1q_f32(bp + k * NR));
+                c1 = vfmaq_f32(c1, a, vld1q_f32(bp + k * NR + 4));
+            }
+            if (bias) {
+                c0 = vaddq_f32(c0, vld1q_f32(bias + n));
+                c1 = vaddq_f32(c1, vld1q_f32(bias + n + 4));
+            }
+            if (n + NR <= N) {
+                vst1q_f32(C + m * N + n,     c0);
+                vst1q_f32(C + m * N + n + 4, c1);
+            } else {
+                float t[8];
+                vst1q_f32(t,     c0); vst1q_f32(t + 4, c1);
+                int nr = N - n;
+                for (int j = 0; j < nr; j++) C[m * N + n + j] = t[j];
+            }
+        }
+    }
 #else
-    matmul_fp32(A, B_packed, C, M, K, N);
-    if (bias) for (int m=0;m<M;m++) for (int n=0;n<N;n++) C[m*N+n]+=bias[n];
+    /* Scalar fallback: B in column-panel format [ceil(N/NR), K, NR], NR=8. */
+    {
+        const int NR = 8;
+        int n_panels = (N + NR - 1) / NR;
+        for (int m = 0; m < M; m++) {
+            for (int p = 0; p < n_panels; p++) {
+                int n_base = p * NR;
+                int nr = (n_base + NR <= N) ? NR : (N - n_base);
+                const float* bp = B_packed + (size_t)p * K * NR;
+                for (int j = 0; j < nr; j++) {
+                    float s = bias ? bias[n_base + j] : 0.0f;
+                    for (int k = 0; k < K; k++)
+                        s += A[(size_t)m * K + k] * bp[k * NR + j];
+                    C[(size_t)m * N + n_base + j] = s;
+                }
+            }
+        }
+    }
 #endif
 }
 
@@ -1007,9 +1187,95 @@ void matmul_bias_gelu_packed(const float* A, const float* B_packed, const float*
             else{float t[8];_mm256_storeu_ps(t,c0);for(int j=0;j<N-n;j++)C[(size_t)m*N+n+j]=t[j];}
         }
     }
+#elif defined(FACEX_HAVE_NEON)
+    /* AArch64 NEON: NR=8, MR=4 matmul; bias added with NEON; GELU applied
+     * per element with erff after the GEMM completes (no vector erf on AArch64). */
+    const int NR = 8;
+    const float inv_sqrt2 = 0.7071067811865476f;
+    int n_panels = (N + NR - 1) / NR;
+    int m = 0;
+
+    for (; m + 4 <= M; m += 4) {
+        for (int p = 0; p < n_panels; p++) {
+            int n = p * NR;
+            const float* bp = B_packed + (size_t)p * K * NR;
+            float32x4_t c00 = vdupq_n_f32(0), c01 = vdupq_n_f32(0);
+            float32x4_t c10 = vdupq_n_f32(0), c11 = vdupq_n_f32(0);
+            float32x4_t c20 = vdupq_n_f32(0), c21 = vdupq_n_f32(0);
+            float32x4_t c30 = vdupq_n_f32(0), c31 = vdupq_n_f32(0);
+            for (int k = 0; k < K; k++) {
+                float32x4_t b0 = vld1q_f32(bp + k * NR);
+                float32x4_t b1 = vld1q_f32(bp + k * NR + 4);
+                float32x4_t a0 = vdupq_n_f32(A[(m + 0) * K + k]);
+                float32x4_t a1 = vdupq_n_f32(A[(m + 1) * K + k]);
+                float32x4_t a2 = vdupq_n_f32(A[(m + 2) * K + k]);
+                float32x4_t a3 = vdupq_n_f32(A[(m + 3) * K + k]);
+                c00 = vfmaq_f32(c00, a0, b0); c01 = vfmaq_f32(c01, a0, b1);
+                c10 = vfmaq_f32(c10, a1, b0); c11 = vfmaq_f32(c11, a1, b1);
+                c20 = vfmaq_f32(c20, a2, b0); c21 = vfmaq_f32(c21, a2, b1);
+                c30 = vfmaq_f32(c30, a3, b0); c31 = vfmaq_f32(c31, a3, b1);
+            }
+            float32x4_t bb0 = vld1q_f32(bias + n);
+            float32x4_t bb1 = vld1q_f32(bias + n + 4);
+            c00 = vaddq_f32(c00, bb0); c01 = vaddq_f32(c01, bb1);
+            c10 = vaddq_f32(c10, bb0); c11 = vaddq_f32(c11, bb1);
+            c20 = vaddq_f32(c20, bb0); c21 = vaddq_f32(c21, bb1);
+            c30 = vaddq_f32(c30, bb0); c31 = vaddq_f32(c31, bb1);
+
+            float t[4][8];
+            vst1q_f32(t[0],     c00); vst1q_f32(t[0] + 4, c01);
+            vst1q_f32(t[1],     c10); vst1q_f32(t[1] + 4, c11);
+            vst1q_f32(t[2],     c20); vst1q_f32(t[2] + 4, c21);
+            vst1q_f32(t[3],     c30); vst1q_f32(t[3] + 4, c31);
+            int nr = (n + NR <= N) ? NR : (N - n);
+            for (int r = 0; r < 4; r++)
+                for (int j = 0; j < nr; j++) {
+                    float v = t[r][j];
+                    C[(m + r) * N + n + j] = 0.5f * v * (1.0f + erff(v * inv_sqrt2));
+                }
+        }
+    }
+    for (; m < M; m++) {
+        for (int p = 0; p < n_panels; p++) {
+            int n = p * NR;
+            const float* bp = B_packed + (size_t)p * K * NR;
+            float32x4_t c0 = vdupq_n_f32(0), c1 = vdupq_n_f32(0);
+            for (int k = 0; k < K; k++) {
+                float32x4_t a = vdupq_n_f32(A[m * K + k]);
+                c0 = vfmaq_f32(c0, a, vld1q_f32(bp + k * NR));
+                c1 = vfmaq_f32(c1, a, vld1q_f32(bp + k * NR + 4));
+            }
+            c0 = vaddq_f32(c0, vld1q_f32(bias + n));
+            c1 = vaddq_f32(c1, vld1q_f32(bias + n + 4));
+            float t[8];
+            vst1q_f32(t,     c0); vst1q_f32(t + 4, c1);
+            int nr = (n + NR <= N) ? NR : (N - n);
+            for (int j = 0; j < nr; j++) {
+                float v = t[j];
+                C[m * N + n + j] = 0.5f * v * (1.0f + erff(v * inv_sqrt2));
+            }
+        }
+    }
 #else
-    matmul_fp32(A, B_packed, C, M, K, N);
-    for(int i=0;i<M*N;i++){float v=C[i]+bias[i%N];C[i]=0.5f*v*(1.0f+erff(v*0.7071067811865476f));}
+    /* Scalar fallback: B in column-panel format [ceil(N/NR), K, NR], NR=8. Bias + GELU. */
+    {
+        const int NR = 8;
+        const float inv_sqrt2 = 0.7071067811865476f;
+        int n_panels = (N + NR - 1) / NR;
+        for (int m = 0; m < M; m++) {
+            for (int p = 0; p < n_panels; p++) {
+                int n_base = p * NR;
+                int nr = (n_base + NR <= N) ? NR : (N - n_base);
+                const float* bp = B_packed + (size_t)p * K * NR;
+                for (int j = 0; j < nr; j++) {
+                    float s = bias[n_base + j];
+                    for (int k = 0; k < K; k++)
+                        s += A[(size_t)m * K + k] * bp[k * NR + j];
+                    C[(size_t)m * N + n_base + j] = 0.5f * s * (1.0f + erff(s * inv_sqrt2));
+                }
+            }
+        }
+    }
 #endif
 }
 
