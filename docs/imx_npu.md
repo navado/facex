@@ -43,6 +43,56 @@ eIQ Toolkit (separate download, not on PyPI) — it consumes the same INT8
 `.tflite` produced in step 2 and emits a Neutron-specialised `.tflite`.
 Skip the Vela step entirely on i.MX 95 and run `neutron-converter` instead.
 
+#### Obtaining neutron-converter
+
+`neutron-converter` is shipped as part of NXP's **eIQ Toolkit** (the
+machine-learning workflow add-on, not the BSP). It is *not* on PyPI,
+GitHub, or any public package mirror — you have to download it from
+nxp.com behind a free developer account.
+
+1. Sign in (or register) at <https://nxp.com> with a developer account.
+2. Go to **Software → Machine Learning → eIQ Toolkit**, or search the
+   site for "eIQ Toolkit". Direct landing page:
+   <https://www.nxp.com/design/design-center/software/eiq-ml-development-environment/eiq-toolkit-for-end-to-end-model-development-and-deployment:EIQ-TOOLKIT>
+3. Download the installer that matches your host:
+   - **Windows** — `.exe` installer (~2 GB), GUI + bundled CLIs.
+   - **Linux** — `.deb` for Ubuntu 22.04 LTS or a generic tarball
+     (un-tar to `/opt/nxp/eIQ_Toolkit_v<version>` and source the env).
+   - macOS is **not officially supported** — use a Linux VM or run
+     conversion on the same Linux host you build BSP images on.
+4. Install. After install, open a shell and source the env script that
+   ships in the install root (path varies by version):
+
+   ```bash
+   source /opt/nxp/eIQ_Toolkit_v1.*/bin/activate.sh
+   neutron-converter --version    # sanity-check
+   ```
+
+   This puts `neutron-converter` (and a few helper tools — `eiq-cli`,
+   model-zoo fetchers, profiler) on `PATH` and points its Python
+   interpreter at the bundled venv. The shell session is the only thing
+   that needs the env; once a `.tflite` is produced it's a plain file
+   you can ship to the board.
+
+5. With the env active, run the wrapper from this repo:
+
+   ```bash
+   tools/compile_neutron.sh weights/edgeface_xs_int8.tflite
+   ```
+
+   It calls `neutron-converter --target imx95 --output …_neutron.tflite`
+   and writes alongside the input. The wrapper auto-detects the `_-`
+   binary-name variants used across eIQ Toolkit versions; if your install
+   uses a different flag layout the script's error message will tell you
+   to consult `neutron-converter --help`.
+
+> **Versioning note.** Pin the eIQ Toolkit release to the one whose
+> `libneutron_delegate.so` matches what NXP's BSP ships on the target
+> board. A converter from a newer toolkit can emit subgraph patterns
+> the on-device delegate doesn't recognise, which manifests at runtime
+> as "0 nodes delegated" even though the file *was* converted. The
+> NXP BSP release notes list the matching toolkit version per release.
+
 ### Step 1: PyTorch → ONNX
 
 The repo doesn't ship the EdgeFace PyTorch model — get it from the upstream
@@ -86,7 +136,18 @@ or replace, re-export, re-Vela.
 
 i.MX 8M Plus skips this step — VxDelegate ingests the plain INT8 `.tflite`
 directly. i.MX 95 uses `neutron-converter` from NXP's eIQ Toolkit instead
-of Vela; the produced `.tflite` is what `libneutron_delegate.so` loads.
+of Vela:
+
+```bash
+tools/compile_neutron.sh weights/edgeface_xs_int8.tflite
+tools/compile_neutron.sh weights/yunet_int8.tflite
+```
+
+Outputs `weights/edgeface_xs_int8_neutron.tflite` etc. — these are the
+files `libneutron_delegate.so` actually accelerates on the NPU. Loading
+the un-converted INT8 file on a Neutron board still "works" (delegate
+loads, model runs), but TFLite logs `0 nodes delegated` and inference
+runs entirely on CPU/XNNPACK.
 
 ---
 

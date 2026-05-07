@@ -142,6 +142,30 @@ static int select_delegate(const char* preferred, LoadedDelegate* out, int verbo
     return -1;
 }
 
+/* Some delegates only claim ops from a model that was processed by their
+ * specific offline compiler. When that's missing, the delegate loads fine
+ * but TFLite logs "0 nodes delegated" and execution silently falls back to
+ * the CPU kernels — same latency as XNNPACK, no NPU offload. The C API
+ * doesn't expose a clean post-modify-graph node count, so we print a
+ * heads-up describing the failure mode and how to fix it; the user pairs
+ * this with the TFLite log to diagnose. */
+static void print_offline_compiler_hint(const char* delegate, int verbose) {
+    if (!verbose) return;
+    if (strcmp(delegate, "neutron") == 0) {
+        fprintf(stderr,
+            "facex/npu: hint — Neutron only accelerates ops from a model\n"
+            "           pre-compiled by neutron-converter (NXP eIQ Toolkit).\n"
+            "           If TFLite logs '0 nodes delegated', re-run your\n"
+            "           .tflite through tools/compile_neutron.sh first.\n");
+    } else if (strcmp(delegate, "ethos-u") == 0) {
+        fprintf(stderr,
+            "facex/npu: hint — Ethos-U only accelerates ops compiled by Vela.\n"
+            "           If TFLite logs '0 nodes delegated', run\n"
+            "           tools/compile_vela.sh on the .tflite first.\n");
+    }
+    /* vx / armnn ingest plain INT8 .tflite — no offline step needed. */
+}
+
 /* ----- Engine state ------------------------------------------------------ */
 
 struct FaceXNpu {
@@ -248,6 +272,7 @@ FaceXNpu* facex_npu_init(const char* embed_tflite,
         if (fx->verbose) fprintf(stderr, "facex/npu: no NPU delegate found — using XNNPACK\n");
     } else {
         snprintf(fx->active, sizeof(fx->active), "%s", fx->delegate.name);
+        print_offline_compiler_hint(fx->delegate.name, fx->verbose);
     }
 
     int n_threads = (opts && opts->num_threads > 0) ? opts->num_threads : 0;
