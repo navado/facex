@@ -7,12 +7,14 @@
  *
  *   i.MX 8M Plus → NXP VxDelegate (VIP9000 NPU, 2.3 TOPS)
  *   i.MX 93      → Arm Ethos-U external delegate (Ethos-U65, ~0.5 TOPS)
- *   i.MX 95      → Arm Ethos-U external delegate (Ethos-U65, ~0.5 TOPS)
+ *   i.MX 95      → NXP eIQ Neutron delegate (Neutron N3 NPU)
  *   any AArch64  → XNNPACK CPU fallback (no NPU, slower, useful for dev)
  *
  * Models are produced offline:
  *   tools/onnx_to_tflite.py   PyTorch → ONNX → quantized .tflite
- *   tools/compile_vela.sh     .tflite → Ethos-U65 command stream  (i.MX 93/95)
+ *   tools/compile_vela.sh     .tflite → Ethos-U65 command stream  (i.MX 93)
+ *   neutron-converter         .tflite → Neutron command stream    (i.MX 95;
+ *                                       ships with NXP eIQ Toolkit)
  *
  * The application code is identical regardless of target — drop a different
  * .tflite file in place and the same binary runs.

@@ -31,7 +31,7 @@ make COREML=1         # opt-in: Core ML / ANE bridge (loads .mlpackage)
 make mac-universal    # fat arm64 + x86_64 libfacex-universal.a for distribution
 make imx-npu          # build libfacex_npu.{so,dylib} (TFLite + NPU delegate)
 make imx93   SDK=...  # cross-compile NPU build for i.MX 93 (Ethos-U65)
-make imx95   SDK=...  # cross-compile NPU build for i.MX 95 (Ethos-U65)
+make imx95   SDK=...  # cross-compile NPU build for i.MX 95 (eIQ Neutron N3)
 make imx8mp  SDK=...  # cross-compile NPU build for i.MX 8M Plus (VxDelegate)
 make clean
 scripts/test_all.sh   # run every test runnable on this host
@@ -91,7 +91,7 @@ See `docs/benchmarking.md` for the full guide.
 - **Weight files are gitignored** (`*.bin`, `*.enc`, `*.npz`). Don't commit them; reference them through `download_weights.sh` or env vars (`FACEX_EMBED_WEIGHTS`, `FACEX_DETECT_WEIGHTS`).
 - **Detector is mid-rewrite.** Sprint plan in `docs/plan/detector_plan.md` is authoritative for direction. Files under `wasm/src/` are the ground-up rewrite; `wasm/detect_new.{js,wasm}` is the in-progress build artifact alongside the legacy `wasm/detect.{js,wasm}`.
 - **Mac perf paths are opt-in flags, not the default.** `make ACCELERATE=1` adds AMX via `cblas_sgemm`, `make SME=1` adds the M4+ SME path, `make COREML=1` adds the Core ML / ANE bridge. Default `make` stays portable across M1-M5 and any Xcode version; the optional flags require Xcode 16+ for SME. See `docs/mac.md` for the full Mac story.
-- **NPU build is a separate library.** `libfacex_npu.{so,dylib}` (built only when `FACEX_BACKEND_TFLITE` is defined) is a TFLite C-API wrapper that runtime-loads VxDelegate / Arm Ethos-U / XNNPACK. Source: `src/backend_tflite.c`, public API: `include/facex_npu.h`. Detector path is intentionally `-ENOSYS` today — see `docs/imx_npu.md` for the recommended hybrid pipeline (CPU detect via libfacex.a + NPU embed via libfacex_npu.so).
+- **NPU build is a separate library.** `libfacex_npu.{so,dylib}` (built only when `FACEX_BACKEND_TFLITE` is defined) is a TFLite C-API wrapper that runtime-loads eIQ Neutron (i.MX 95) / VxDelegate (8M Plus) / Arm Ethos-U (i.MX 93) / XNNPACK. Source: `src/backend_tflite.c`, public API: `include/facex_npu.h`. Detector path is intentionally `-ENOSYS` today — see `docs/imx_npu.md` for the recommended hybrid pipeline (CPU detect via libfacex.a + NPU embed via libfacex_npu.so).
 - **ESP32-P4 is an ESP-IDF component, not a Make target.** `components/facex/` is the IDF wrapper, `examples/esp32p4_camera/` is a runnable IDF project. Build via `idf.py build flash monitor`, not `make`. The MIPI-CSI capture path is real; the face-detection backend defaults to a Kconfig-selected `stub` (synthetic faces) because EdgeFace-XS doesn't fit P4 RAM in real-time. The production path needs EdgeFace-Nano + ESP-NN backend — see `docs/esp32p4.md`.
 
 ## Limitations to keep in mind

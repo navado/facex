@@ -1,8 +1,8 @@
 /*
  * backend_tflite.c — TFLite C-API wrapper that dispatches to a
  * runtime-selected delegate. Powers the i.MX NPU path (VxDelegate on 8M
- * Plus, Arm Ethos-U external delegate on 93/95) plus a CPU XNNPACK
- * fallback.
+ * Plus, Arm Ethos-U external delegate on 93, eIQ Neutron delegate on 95)
+ * plus a CPU XNNPACK fallback.
  *
  * Build:
  *   - Compile only when FACEX_BACKEND_TFLITE is defined.
@@ -71,10 +71,15 @@ typedef struct {
 
 /* Search order — first match wins unless the user pins a preference. */
 static const DelegateSpec kKnownDelegates[] = {
+    /* NXP eIQ Neutron N3 (i.MX 95). Driver is /dev/neutron0, delegate
+     * shipped by NXP in BSP /usr/lib/. Listed first so on a 95 EVK we
+     * pick Neutron over anything else also present. */
+    { "neutron",  "libneutron_delegate.so",  "tflite_plugin_create_delegate",
+                                              "tflite_plugin_destroy_delegate" },
     /* NXP VIP9000 (i.MX 8M Plus). NXP ships this in BSP /usr/lib/. */
     { "vx",       "libvx_delegate.so",       "tflite_plugin_create_delegate",
                                               "tflite_plugin_destroy_delegate" },
-    /* Arm Ethos-U external delegate (i.MX 93 / 95). Comes from
+    /* Arm Ethos-U external delegate (i.MX 93). Comes from
      * ml-extensions/ethos-u-delegate, NXP ships in BSP. */
     { "ethos-u",  "libethosu_delegate.so",   "tflite_plugin_create_delegate",
                                               "tflite_plugin_destroy_delegate" },

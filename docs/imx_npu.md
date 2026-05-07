@@ -8,7 +8,7 @@ delegate:
 |---|---|---|---|
 | **i.MX 8M Plus** | NXP VxDelegate | `libvx_delegate.so` | Verisilicon VIP9000, 2.3 TOPS |
 | **i.MX 93** | Arm Ethos-U external delegate | `libethosu_delegate.so` | Arm Ethos-U65, ~0.5 TOPS |
-| **i.MX 95** | Arm Ethos-U external delegate | `libethosu_delegate.so` | Arm Ethos-U65, ~0.5 TOPS |
+| **i.MX 95** | NXP eIQ Neutron delegate | `libneutron_delegate.so` | NXP eIQ Neutron N3 |
 | any AArch64 | XNNPACK (built-in) | (TFLite itself) | CPU only — slower |
 
 Same C API (`facex_npu.h`), same `.tflite` artefacts (compiled offline),
@@ -32,11 +32,16 @@ on a beefy host machine, and produces artefacts you ship to the board.
 
 ```bash
 pip install onnx2tf onnxruntime tensorflow numpy Pillow
-pip install ethos-u-vela    # only for i.MX 93 / 95
+pip install ethos-u-vela    # only for i.MX 93
 ```
 
 Vela needs Python ≥ 3.10 and works best on Linux; it also runs on macOS
 arm64 once the wheel is installed.
+
+For **i.MX 95** the offline compiler is `neutron-converter` from NXP's
+eIQ Toolkit (separate download, not on PyPI) — it consumes the same INT8
+`.tflite` produced in step 2 and emits a Neutron-specialised `.tflite`.
+Skip the Vela step entirely on i.MX 95 and run `neutron-converter` instead.
 
 ### Step 1: PyTorch → ONNX
 
@@ -61,7 +66,7 @@ format — they get resized + normalised inside the script). **Skipping
 calibration is allowed but produces poor INT8 accuracy** — always provide
 real images for production.
 
-### Step 3 (i.MX 93 / 95 only): TFLite → Vela command stream
+### Step 3 (i.MX 93 only): TFLite → Vela command stream
 
 ```bash
 tools/compile_vela.sh weights/edgeface_xs_int8.tflite
@@ -80,7 +85,8 @@ activations (`GELU`, `swish`), dynamic shapes, ops that need FP32. Decompose
 or replace, re-export, re-Vela.
 
 i.MX 8M Plus skips this step — VxDelegate ingests the plain INT8 `.tflite`
-directly.
+directly. i.MX 95 uses `neutron-converter` from NXP's eIQ Toolkit instead
+of Vela; the produced `.tflite` is what `libneutron_delegate.so` loads.
 
 ---
 
@@ -138,7 +144,7 @@ FaceXNpu* fx = facex_npu_init("edgeface_xs_int8_vela.tflite",
                               &opts);
 if (!fx) { /* check stderr — model missing, delegate failed, etc. */ }
 
-printf("dispatch: %s\n", facex_npu_active_delegate(fx)); /* "ethos-u" / "vx" / "xnnpack" */
+printf("dispatch: %s\n", facex_npu_active_delegate(fx)); /* "neutron" / "ethos-u" / "vx" / "xnnpack" */
 
 float emb[512];
 facex_npu_embed(fx, aligned_face_112x112, emb);   /* float32 HWC, [-1,1] */
@@ -205,20 +211,33 @@ The test is short on purpose: it validates `facex_npu_init` returns NULL
 on bad input, that `facex_npu_active_delegate` reports a sensible value,
 and that one `facex_npu_embed` call completes with finite output.
 
-### Hardware bring-up checklist (i.MX 93 / 95)
+### Hardware bring-up checklist
 
-When you first plug in an EVK:
+When you first plug in an EVK, the four sanity checks are the same shape
+on every SoC — only the names change.
 
-1. `lsmod | grep ethosu` — kernel driver loaded?
-2. `ls /dev/ethosu0` — userspace device node present?
-3. `ldconfig -p | grep ethosu_delegate` — Arm Ethos-U external delegate library installed?
-4. `vela --version` available on the host you used for the model conversion?
-5. `./imx_npu_compile_test embed_vela.tflite` — does it print `active delegate: ethos-u`? If it prints `xnnpack`, the delegate didn't load — turn on `verbose=1` to see why (usually `dlopen` errors).
+| Check | i.MX 93 | i.MX 95 | i.MX 8M Plus |
+|---|---|---|---|
+| Kernel config | `CONFIG_ARM_ETHOSU` | `CONFIG_NEUTRON` + `CONFIG_IMX_NEUTRON_REMOTEPROC` | `CONFIG_GALCORE` |
+| `/sys/class/` entry | (driver-specific) | `/sys/class/neutron` | (driver-specific) |
+| Device node | `/dev/ethosu0` | `/dev/neutron0` | `/dev/galcore` |
+| Delegate `.so` | `libethosu_delegate.so` | `libneutron_delegate.so` | `libvx_delegate.so` |
+| Firmware blob (if any) | — | `NeutronFirmware.elf` | (in-tree) |
+| Offline compiler | `vela` | `neutron-converter` (eIQ Toolkit) | (none — VxDelegate ingests plain INT8) |
+| Expected `active_delegate` | `ethos-u` | `neutron` | `vx` |
 
-### i.MX 8M Plus
+Then:
 
-Replace `ethosu` / `ethos-u-delegate` with `galcore` / `vx_delegate` in
-the checks above. The expected `active delegate` print is `vx`.
+```bash
+./imx_npu_compile_test embed_<board>.tflite
+# prints e.g. "active delegate: neutron" on a healthy i.MX 95
+```
+
+If it prints `xnnpack` instead, the NPU delegate didn't `dlopen` —
+re-run with `verbose=1` in `FaceXNpuOptions` and check `stderr`. Most
+common causes: `.so` not on the loader path (fix with `ldconfig` or
+`LD_LIBRARY_PATH`), kernel driver not loaded, or device node missing
+permissions.
 
 ---
 

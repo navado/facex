@@ -292,15 +292,15 @@ clean:
 #
 #   make imx-npu                    # host-side dev build (links host libtensorflowlite_c)
 #   make imx93   SDK=/opt/imx-yocto # cross-compile for i.MX 93   (Cortex-A55 + Ethos-U65)
-#   make imx95   SDK=/opt/imx-yocto # cross-compile for i.MX 95   (same artifact)
+#   make imx95   SDK=/opt/imx-yocto # cross-compile for i.MX 95   (Cortex-A55 + Neutron N3)
 #   make imx8mp  SDK=/opt/imx-yocto # cross-compile for i.MX 8M Plus (VxDelegate / VIP9000)
 #
 # SDK= points at an NXP Yocto toolchain root. The `environment-setup-…`
 # script there sets CC, CFLAGS, LDFLAGS — we just source it.
 #
 # Output: libfacex_npu.{so,dylib} — a TFLite-backed engine that auto-selects
-# NXP VxDelegate → Arm Ethos-U external delegate → XNNPACK fallback at
-# runtime. See docs/imx_npu.md.
+# eIQ Neutron → NXP VxDelegate → Arm Ethos-U external delegate → XNNPACK
+# fallback at runtime. See docs/imx_npu.md.
 # ---------------------------------------------------------------------------
 
 # Optional build inputs:
@@ -341,7 +341,8 @@ imx93:
 	          -ltensorflowlite_c -ldl -lm -lpthread'
 	@echo "Built libfacex_npu.so for i.MX 93"
 
-# i.MX 95 — same A55 + Ethos-U65, same artifact as i.MX 93.
+# i.MX 95 — Cortex-A55 + eIQ Neutron N3 NPU (NOT Ethos-U65). Same source
+# artifact as imx93; runtime picks libneutron_delegate.so on this board.
 imx95:
 	@if [ -z "$(SDK)" ]; then echo "set SDK=/path/to/imx-yocto-sdk"; exit 1; fi
 	@bash -c '. $(SDK)/environment-setup-aarch64-poky-linux && \
