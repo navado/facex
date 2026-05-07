@@ -127,12 +127,44 @@ static int try_load_one(const DelegateSpec* spec, LoadedDelegate* out, int verbo
     return 0;
 }
 
+/* Derive a short logging name from a delegate library path.
+ *   /usr/lib/libneutron_delegate.so → "neutron"
+ *   ./build/libfoo.so                → "foo"
+ *   anything unparseable             → "external" */
+static void derive_path_name(const char* path, char* buf, size_t buflen) {
+    const char* base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    /* Strip "lib" prefix and any of the common delegate-suffix shapes. */
+    if (strncmp(base, "lib", 3) == 0) base += 3;
+    snprintf(buf, buflen, "%s", base);
+    char* dot = strchr(buf, '.');                  /* drop ".so" / ".dylib" */
+    if (dot) *dot = 0;
+    char* sfx = strstr(buf, "_delegate");          /* drop "_delegate" */
+    if (sfx) *sfx = 0;
+    sfx = strstr(buf, "Delegate");
+    if (sfx) *sfx = 0;
+    if (!buf[0]) snprintf(buf, buflen, "external");
+}
+
 /* Selects a delegate. Returns 0 + populates `out` on success.
- * If preferred is non-NULL, ONLY that delegate is attempted (no fallback);
- * if NULL, the kKnownDelegates list is walked in order. Returns -1 if no
- * delegate could be loaded — caller must decide whether to fall back to
- * XNNPACK (CPU). */
-static int select_delegate(const char* preferred, LoadedDelegate* out, int verbose) {
+ * If `path` is non-NULL it is dlopen'd directly, bypassing the registry.
+ * Otherwise if `preferred` is non-NULL, ONLY that delegate is attempted (no
+ * fallback); if both are NULL, the kKnownDelegates list is walked in order.
+ * Returns -1 if no delegate could be loaded — caller must decide whether
+ * to fall back to XNNPACK (CPU). */
+static int select_delegate(const char* preferred, const char* path,
+                           LoadedDelegate* out, int verbose) {
+    if (path && path[0]) {
+        char nm[32];
+        derive_path_name(path, nm, sizeof(nm));
+        DelegateSpec spec = {
+            .name        = nm,
+            .libname     = path,
+            .create_sym  = "tflite_plugin_create_delegate",
+            .destroy_sym = "tflite_plugin_destroy_delegate",
+        };
+        return try_load_one(&spec, out, verbose);
+    }
     if (preferred && strcmp(preferred, "xnnpack") == 0) return -1;  /* explicit CPU */
     for (const DelegateSpec* s = kKnownDelegates; s->name; s++) {
         if (preferred && strcmp(preferred, s->name) != 0) continue;
@@ -261,7 +293,13 @@ FaceXNpu* facex_npu_init(const char* embed_tflite,
 
     /* 1. Pick a delegate (NPU first, XNNPACK fallback). */
     const char* pref = (opts && opts->preferred_delegate) ? opts->preferred_delegate : NULL;
-    if (select_delegate(pref, &fx->delegate, fx->verbose) != 0) {
+    const char* path = (opts && opts->external_delegate_path) ? opts->external_delegate_path : NULL;
+    if (select_delegate(pref, path, &fx->delegate, fx->verbose) != 0) {
+        if (path) {
+            fprintf(stderr, "facex/npu: external delegate at '%s' failed to load\n", path);
+            free(fx);
+            return NULL;
+        }
         if (pref) {
             fprintf(stderr, "facex/npu: requested delegate '%s' unavailable\n", pref);
             free(fx);

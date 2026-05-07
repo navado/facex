@@ -285,7 +285,7 @@ clean:
 	      libdetect.a libfacex_npu.so libfacex_npu.dylib \
 	      facex-cli$(EXT) facex-example$(EXT) facex-encrypt$(EXT) \
 	      golden-test$(EXT) facex-mac-test$(EXT) facex-bench$(EXT) facex-camera-bench \
-	      imx_npu_compile_test *.o
+	      imx_npu_compile_test facex-bench-npu *.o
 
 # ---------------------------------------------------------------------------
 # i.MX NPU build (TFLite C API + runtime-loaded delegate).
@@ -368,3 +368,11 @@ imx_npu_compile_test: tests/test_imx_npu_compile.c $(NPU_LIB)
 	$(CC) $(NPU_CFLAGS) -o $@ tests/test_imx_npu_compile.c \
 	    -L. -lfacex_npu $(NPU_LDFLAGS)
 	@echo "Built imx_npu_compile_test (run with: ./imx_npu_compile_test [embed.tflite [detect.tflite]])"
+
+# Latency benchmark for the NPU path. Mirrors facex-bench's CSV schema so
+# rows from both can be concatenated and ingested by scripts/bench_all.sh
+# or any spreadsheet tool. Requires libfacex_npu.so to have been built.
+facex-bench-npu: tools/bench_npu.c $(NPU_LIB)
+	$(CC) $(NPU_CFLAGS) -o $@ tools/bench_npu.c \
+	    -L. -lfacex_npu $(NPU_LDFLAGS)
+	@echo "Built facex-bench-npu (run with: ./facex-bench-npu --embed PATH.tflite [--delegate NAME] [--external-delegate /usr/lib/libneutron_delegate.so])"

@@ -272,6 +272,28 @@ The test is short on purpose: it validates `facex_npu_init` returns NULL
 on bad input, that `facex_npu_active_delegate` reports a sensible value,
 and that one `facex_npu_embed` call completes with finite output.
 
+### Latency benchmark (`facex-bench-npu`)
+
+`tools/bench_npu.c` is the TFLite-side companion to `facex-bench` — same
+synthetic input pattern, same CSV schema, but inference runs through
+the delegate stack. Useful for capturing CPU NEON vs XNNPACK vs Neutron
+side-by-side without juggling two output formats.
+
+```bash
+make facex-bench-npu
+
+# Auto-pick: tries Neutron → vx → Ethos-U → XNNPACK in order.
+./facex-bench-npu --embed weights/edgeface_xs_int8.tflite
+
+# Match NXP's `benchmark_model --external_delegate_path=…`:
+./facex-bench-npu \
+    --embed weights/edgeface_xs_int8_neutron.tflite \
+    --external-delegate /usr/lib/libneutron_delegate.so
+```
+
+See `docs/benchmarking.md` for the full flag list and the "compare three
+backends in one CSV" recipe.
+
 ### Hardware bring-up checklist
 
 When you first plug in an EVK, the four sanity checks are the same shape

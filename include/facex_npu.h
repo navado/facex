@@ -36,8 +36,17 @@ typedef struct FaceXNpu FaceXNpu;
 
 typedef struct {
     /* Hint for which TFLite delegate to attempt first. NULL = auto.
-     * Set to "vx" / "ethos-u" / "xnnpack" / "armnn" to force one. */
+     * Set to "neutron" / "vx" / "ethos-u" / "xnnpack" / "armnn" to force one. */
     const char* preferred_delegate;
+
+    /* Optional absolute path to an external delegate .so to dlopen directly,
+     * bypassing the built-in registry. The shared object must expose the
+     * standard TFLite external-delegate ABI (`tflite_plugin_create_delegate`
+     * + `tflite_plugin_destroy_delegate`). Useful for benchmarking unusual
+     * delegates without rebuilding libfacex_npu.so, and for matching
+     * NXP's `benchmark_model --external_delegate_path=…` invocation.
+     * If both this and `preferred_delegate` are set, the path wins. */
+    const char* external_delegate_path;
 
     /* Number of CPU threads for the XNNPACK fallback and for any layers the
      * NPU rejects (kept on CPU). 0 = autodetect. */

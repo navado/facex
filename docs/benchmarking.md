@@ -8,14 +8,15 @@ thing. This page explains which tool does what, and how to produce a
 
 | Tool | Measures | Input | Output schema |
 |---|---|---|---|
-| `tools/bench.c` (`make bench` → `./facex-bench`) | Engine latency: `embed` and/or `detect+align+embed` (e2e) | Synthetic deterministic | md / csv / json (selectable) |
+| `tools/bench.c` (`make bench` → `./facex-bench`) | CPU engine latency: `embed` and/or `detect+align+embed` (e2e) | Synthetic deterministic | md / csv / json (selectable) |
+| `tools/bench_npu.c` (`make facex-bench-npu` → `./facex-bench-npu`) | TFLite-delegate latency (Neutron, Ethos-U, VxDelegate, XNNPACK) | Synthetic deterministic | md / csv / json (selectable) — same CSV schema as `facex-bench` |
 | `tools/bench_camera_mac.swift` (`make bench-camera` → `./facex-camera-bench`) | Camera capture pipeline: AVFoundation → downscale → engine. End-to-end frame budget. | Live camera | per-second log + `--summary` CSV row |
 | `tests/bench_detect.c` (`gcc … bench_detect.c -L. -lfacex`) | Detector latency only | Synthetic | text |
 | `tests/test_mac.c` (`make mac-test`) | Smoke test with embedded latency stats | Synthetic | text + backend report |
 | `wasm/bench.js` (`node wasm/bench.js`) | Embed latency under WASM | Synthetic | text |
 | `bench_node.mjs` (`node bench_node.mjs`) | LFW **accuracy** (not latency) | LFW image pairs | text |
 
-The first two share a CSV schema so they can be combined:
+The first three share a CSV schema so they can be combined:
 
 ```
 label,compiled,active,stage,iters,min_ms,median_ms,mean_ms,p95_ms,p99_ms,e2e_face
@@ -93,6 +94,84 @@ Flags:
 | `--label STR` | `""` | Tag for the row (set by `bench_all.sh`) |
 | `--embed PATH` | `data/edgeface_xs_fp32.bin` | Embedder weights |
 | `--detect PATH` | `weights/yunet_fp32.bin` (use `''` to skip) | Detector weights |
+
+## `tools/bench_npu.c` (TFLite-delegate latency)
+
+Same synthetic input pattern as `facex-bench`, but inference runs through
+`libfacex_npu.so` → TFLite C API → an external delegate. Lets a single
+harness compare CPU NEON (`facex-bench`), XNNPACK (`facex-bench-npu`
+fallback), and any installed NPU delegate (Neutron / Ethos-U / VxDelegate)
+in one CSV.
+
+```bash
+# Build (depends on libfacex_npu.so — run `make imx-npu` first or cross-build).
+make facex-bench-npu
+
+# Plain INT8 model on whatever delegate is auto-picked:
+./facex-bench-npu --embed weights/edgeface_xs_int8.tflite
+
+# Pin XNNPACK to get a clean CPU/TFLite baseline:
+./facex-bench-npu --embed weights/edgeface_xs_int8.tflite --delegate xnnpack \
+    --label "tflite-xnnpack" --format csv
+
+# Force the i.MX 95 Neutron delegate by absolute path (matches NXP's
+# benchmark_model --external_delegate_path=… invocation):
+./facex-bench-npu \
+    --embed weights/edgeface_xs_int8_neutron.tflite \
+    --external-delegate /usr/lib/libneutron_delegate.so \
+    --label "neutron" --format csv
+```
+
+Flags:
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--embed PATH` | (required) | `.tflite` embedder model |
+| `--iters N` | 100 | Measurement iterations |
+| `--warmup K` | 10 | Untimed warmup runs |
+| `--format md\|csv\|json` | md | Same output schema as `facex-bench` |
+| `--label STR` | `""` | Tag for the row |
+| `--delegate NAME` | (auto) | `neutron` / `vx` / `ethos-u` / `xnnpack` / `armnn` |
+| `--external-delegate PATH` | — | dlopen this `.so` directly, bypassing the registry. Wins over `--delegate`. |
+| `--threads N` | autodetect | CPU threads for fallback layers |
+
+The `compiled` column is fixed to `TFLite`; the `active` column is what
+`facex_npu_active_delegate()` reports — `neutron`, `vx`, `ethos-u`,
+`xnnpack`, or whatever name was derived from `--external-delegate`'s
+basename.
+
+E2E (`detect+align+embed`) is **not** in this bench: `facex_npu_detect`
+is `-ENOSYS` today (see `docs/imx_npu.md` §6) and routing the detector
+through the CPU `libfacex.a` here would conflate backends. For e2e
+numbers on a hybrid CPU-detect / NPU-embed deployment, run
+`facex-bench --stage e2e` (CPU only) and `facex-bench-npu --embed`
+separately and add the medians.
+
+### Comparing CPU NEON vs XNNPACK vs Neutron
+
+```bash
+make bench && make facex-bench-npu
+
+./facex-bench --stage embed --format csv --label "neon" \
+    | tee /tmp/cmp.csv
+
+./facex-bench-npu --embed weights/edgeface_xs_int8.tflite \
+    --delegate xnnpack --format csv --label "tflite-xnnpack" \
+    | tail -n +2 >> /tmp/cmp.csv
+
+./facex-bench-npu --embed weights/edgeface_xs_int8_neutron.tflite \
+    --external-delegate /usr/lib/libneutron_delegate.so --format csv \
+    --label "neutron" \
+    | tail -n +2 >> /tmp/cmp.csv
+
+# /tmp/cmp.csv now has three rows in one schema, ready for spreadsheet.
+```
+
+A common diagnostic outcome: the `neutron` row has latency identical to
+the `tflite-xnnpack` row. That means the model wasn't compiled with
+`neutron-converter` — TFLite logs `0 nodes delegated` and silently runs
+on CPU. Fix: re-run the model through `tools/compile_neutron.sh` and
+re-bench. See `docs/imx_npu.md` §1 for the full eIQ Toolkit setup.
 
 ## `tools/bench_camera_mac.swift` (live camera)
 
