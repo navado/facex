@@ -290,10 +290,19 @@ clean:
 # ---------------------------------------------------------------------------
 # i.MX NPU build (TFLite C API + runtime-loaded delegate).
 #
-#   make imx-npu                    # host-side dev build (links host libtensorflowlite_c)
+#   make imx-npu                    # host-side dev build (uses vendored headers)
 #   make imx93   SDK=/opt/imx-yocto # cross-compile for i.MX 93   (Cortex-A55 + Ethos-U65)
 #   make imx95   SDK=/opt/imx-yocto # cross-compile for i.MX 95   (Cortex-A55 + Neutron N3)
 #   make imx8mp  SDK=/opt/imx-yocto # cross-compile for i.MX 8M Plus (VxDelegate / VIP9000)
+#
+# Headers: third_party/tflite_c/include/ ships a vendored subset of the
+# TFLite C-API headers (~14 files / 280 KB, pulled from tensorflow@v2.19.0).
+# Override with TFLITE_INCLUDE=/path/to/your/tflite/include to use a
+# system-installed alternative.
+#
+# Link library: defaults to -ltensorflowlite_c (upstream layout). NXP runtime
+# images expose the C-API symbols inside libtensorflow-lite.so itself — on
+# those, build with TFLITE_LIBNAME=tensorflow-lite.
 #
 # SDK= points at an NXP Yocto toolchain root. The `environment-setup-…`
 # script there sets CC, CFLAGS, LDFLAGS — we just source it.
@@ -304,14 +313,12 @@ clean:
 # ---------------------------------------------------------------------------
 
 # Optional build inputs:
-TFLITE_INCLUDE ?=
+TFLITE_INCLUDE ?= third_party/tflite_c/include
 TFLITE_LIB     ?=
+TFLITE_LIBNAME ?= tensorflowlite_c
 
-NPU_CFLAGS = -O3 -fPIC -DFACEX_BACKEND_TFLITE -Iinclude
-ifneq ($(TFLITE_INCLUDE),)
-  NPU_CFLAGS += -I$(TFLITE_INCLUDE)
-endif
-NPU_LDFLAGS = -ltensorflowlite_c -ldl -lm -lpthread
+NPU_CFLAGS = -O3 -fPIC -DFACEX_BACKEND_TFLITE -Iinclude -I$(TFLITE_INCLUDE)
+NPU_LDFLAGS = -l$(TFLITE_LIBNAME) -ldl -lm -lpthread
 ifneq ($(TFLITE_LIB),)
   NPU_LDFLAGS := -L$(TFLITE_LIB) $(NPU_LDFLAGS)
 endif
@@ -335,10 +342,10 @@ imx93:
 	@if [ -z "$(SDK)" ]; then echo "set SDK=/path/to/imx-yocto-sdk"; exit 1; fi
 	@echo "sourcing $(SDK)/environment-setup-aarch64-poky-linux"
 	@bash -c '. $(SDK)/environment-setup-aarch64-poky-linux && \
-	          $$CC -O3 -fPIC -DFACEX_BACKEND_TFLITE -Iinclude \
+	          $$CC -O3 -fPIC -DFACEX_BACKEND_TFLITE -Iinclude -I$(TFLITE_INCLUDE) \
 	          -mcpu=cortex-a55 -march=armv8.2-a+dotprod+fp16 \
 	          -shared -o libfacex_npu.so src/backend_tflite.c \
-	          -ltensorflowlite_c -ldl -lm -lpthread'
+	          -l$(TFLITE_LIBNAME) -ldl -lm -lpthread'
 	@echo "Built libfacex_npu.so for i.MX 93"
 
 # i.MX 95 — Cortex-A55 + eIQ Neutron N3 NPU (NOT Ethos-U65). Same source
@@ -346,20 +353,20 @@ imx93:
 imx95:
 	@if [ -z "$(SDK)" ]; then echo "set SDK=/path/to/imx-yocto-sdk"; exit 1; fi
 	@bash -c '. $(SDK)/environment-setup-aarch64-poky-linux && \
-	          $$CC -O3 -fPIC -DFACEX_BACKEND_TFLITE -Iinclude \
+	          $$CC -O3 -fPIC -DFACEX_BACKEND_TFLITE -Iinclude -I$(TFLITE_INCLUDE) \
 	          -mcpu=cortex-a55 -march=armv8.2-a+dotprod+fp16 \
 	          -shared -o libfacex_npu.so src/backend_tflite.c \
-	          -ltensorflowlite_c -ldl -lm -lpthread'
+	          -l$(TFLITE_LIBNAME) -ldl -lm -lpthread'
 	@echo "Built libfacex_npu.so for i.MX 95"
 
 # i.MX 8M Plus — Cortex-A53 + VIP9000 NPU via NXP VxDelegate.
 imx8mp:
 	@if [ -z "$(SDK)" ]; then echo "set SDK=/path/to/imx-yocto-sdk"; exit 1; fi
 	@bash -c '. $(SDK)/environment-setup-aarch64-poky-linux && \
-	          $$CC -O3 -fPIC -DFACEX_BACKEND_TFLITE -Iinclude \
+	          $$CC -O3 -fPIC -DFACEX_BACKEND_TFLITE -Iinclude -I$(TFLITE_INCLUDE) \
 	          -mcpu=cortex-a53 -march=armv8-a+crc \
 	          -shared -o libfacex_npu.so src/backend_tflite.c \
-	          -ltensorflowlite_c -ldl -lm -lpthread'
+	          -l$(TFLITE_LIBNAME) -ldl -lm -lpthread'
 	@echo "Built libfacex_npu.so for i.MX 8M Plus"
 
 # i.MX 8M Plus — native CPU library build (no NPU, no SDK needed).
