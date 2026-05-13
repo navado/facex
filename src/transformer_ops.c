@@ -544,11 +544,11 @@ void matmul_fp32(const float* A, const float* B, float* C,
 void pack_b_fp32(const float* B, int K, int N, float* packed) {
 #if defined(__AVX512F__)
     int NR = 16;
-#elif defined(__AVX2__)
+#elif defined(__AVX2__) || defined(FACEX_HAVE_NEON)
     int NR = 8;
 #endif
 
-#if defined(__AVX2__) || defined(__AVX512F__)
+#if defined(__AVX512F__) || defined(__AVX2__) || defined(FACEX_HAVE_NEON)
     int n_panels = (N + NR - 1) / NR;
     for (int p = 0; p < n_panels; p++) {
         int n_start = p * NR;
@@ -562,7 +562,8 @@ void pack_b_fp32(const float* B, int K, int N, float* packed) {
         }
     }
 #else
-    /* Scalar: just copy — matmul_fp32 expects standard [K,N] layout */
+    /* Truly scalar fallback — no panel-consuming matmul_fp32_packed kernel
+     * exists on this arch, so a flat [K,N] copy is what the consumer sees. */
     memcpy(packed, B, (size_t)K * N * sizeof(float));
 #endif
 }
@@ -570,7 +571,7 @@ void pack_b_fp32(const float* B, int K, int N, float* packed) {
 int packed_b_fp32_size(int K, int N) {
 #ifdef __AVX512F__
     return ((N + 15) / 16) * K * 16;
-#elif defined(__AVX2__)
+#elif defined(__AVX2__) || defined(FACEX_HAVE_NEON)
     return ((N + 7) / 8) * K * 8;
 #else
     return K * N;
