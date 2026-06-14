@@ -172,6 +172,12 @@ static void print_backends_active(char* buf, size_t n) {
 
 /* ---- output formatters ------------------------------------------------- */
 
+/* Single-stream throughput (inferences/sec) derived from median latency.
+ * The engine already uses the threadpool internally per inference, so this is
+ * the sustained 1-stream rate; concurrent-stream throughput would need a
+ * dedicated multi-request harness. */
+#define THROUGHPUT(median_ms) ((median_ms) > 0.0 ? 1000.0 / (median_ms) : 0.0)
+
 static void emit_md(const Args* a,
                     const char* compiled, const char* active,
                     const Stats* s_embed, const Stats* s_e2e,
@@ -180,16 +186,18 @@ static void emit_md(const Args* a,
     if (a->label[0]) printf("**label:** %s  \n", a->label);
     printf("**backends compiled:** %s  \n",  compiled);
     printf("**backends active:** %s  \n\n", active);
-    printf("| stage | iters | min ms | median ms | mean ms | p95 ms | p99 ms |\n");
-    printf("|---|--:|--:|--:|--:|--:|--:|\n");
+    printf("| stage | iters | min ms | median ms | mean ms | p95 ms | p99 ms | throughput (inf/s) |\n");
+    printf("|---|--:|--:|--:|--:|--:|--:|--:|\n");
     if (a->do_embed && s_embed) {
-        printf("| embed | %d | %.3f | %.3f | %.3f | %.3f | %.3f |\n",
-               s_embed->n, s_embed->min, s_embed->median, s_embed->mean, s_embed->p95, s_embed->p99);
+        printf("| embed | %d | %.3f | %.3f | %.3f | %.3f | %.3f | %.1f |\n",
+               s_embed->n, s_embed->min, s_embed->median, s_embed->mean, s_embed->p95, s_embed->p99,
+               THROUGHPUT(s_embed->median));
     }
     if (a->do_e2e && s_e2e) {
-        printf("| e2e (detect+align+embed%s) | %d | %.3f | %.3f | %.3f | %.3f | %.3f |\n",
+        printf("| e2e (detect+align+embed%s) | %d | %.3f | %.3f | %.3f | %.3f | %.3f | %.1f |\n",
                e2e_have_face ? "" : ", no face",
-               s_e2e->n, s_e2e->min, s_e2e->median, s_e2e->mean, s_e2e->p95, s_e2e->p99);
+               s_e2e->n, s_e2e->min, s_e2e->median, s_e2e->mean, s_e2e->p95, s_e2e->p99,
+               THROUGHPUT(s_e2e->median));
     }
     printf("\n");
 }
@@ -199,17 +207,18 @@ static void emit_csv(const Args* a,
                      const Stats* s_embed, const Stats* s_e2e,
                      int e2e_have_face) {
     /* Header */
-    printf("label,compiled,active,stage,iters,min_ms,median_ms,mean_ms,p95_ms,p99_ms,e2e_face\n");
+    printf("label,compiled,active,stage,iters,min_ms,median_ms,mean_ms,p95_ms,p99_ms,throughput_ips,e2e_face\n");
     if (a->do_embed && s_embed) {
-        printf("\"%s\",\"%s\",\"%s\",embed,%d,%.3f,%.3f,%.3f,%.3f,%.3f,\n",
+        printf("\"%s\",\"%s\",\"%s\",embed,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.2f,\n",
                a->label, compiled, active,
-               s_embed->n, s_embed->min, s_embed->median, s_embed->mean, s_embed->p95, s_embed->p99);
+               s_embed->n, s_embed->min, s_embed->median, s_embed->mean, s_embed->p95, s_embed->p99,
+               THROUGHPUT(s_embed->median));
     }
     if (a->do_e2e && s_e2e) {
-        printf("\"%s\",\"%s\",\"%s\",e2e,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%d\n",
+        printf("\"%s\",\"%s\",\"%s\",e2e,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.2f,%d\n",
                a->label, compiled, active,
                s_e2e->n, s_e2e->min, s_e2e->median, s_e2e->mean, s_e2e->p95, s_e2e->p99,
-               e2e_have_face);
+               THROUGHPUT(s_e2e->median), e2e_have_face);
     }
 }
 
@@ -225,8 +234,8 @@ static void emit_json(const Args* a,
     int first = 1;
 #define ROW(name, st, has_face) do { \
         if (!first) printf(",\n"); first = 0; \
-        printf("    { \"name\": \"%s\", \"iters\": %d, \"min_ms\": %.3f, \"median_ms\": %.3f, \"mean_ms\": %.3f, \"p95_ms\": %.3f, \"p99_ms\": %.3f%s }", \
-               name, (st)->n, (st)->min, (st)->median, (st)->mean, (st)->p95, (st)->p99, \
+        printf("    { \"name\": \"%s\", \"iters\": %d, \"min_ms\": %.3f, \"median_ms\": %.3f, \"mean_ms\": %.3f, \"p95_ms\": %.3f, \"p99_ms\": %.3f, \"throughput_ips\": %.2f%s }", \
+               name, (st)->n, (st)->min, (st)->median, (st)->mean, (st)->p95, (st)->p99, THROUGHPUT((st)->median), \
                (has_face) >= 0 ? (has_face ? ", \"e2e_face\": true" : ", \"e2e_face\": false") : ""); \
     } while (0)
     if (a->do_embed && s_embed) ROW("embed", s_embed, -1);

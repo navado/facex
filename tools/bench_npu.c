@@ -134,24 +134,28 @@ static int parse_args(int argc, char** argv, Args* a) {
  * "compiled" column is fixed to "TFLite" since the actual op kernels live
  * inside the delegate / TFLite runtime, not in libfacex_npu.so itself. */
 
+/* Single-stream throughput (inferences/sec) from median latency. Same schema as
+ * tools/bench.c so rows from both tools concatenate. */
+#define THROUGHPUT(median_ms) ((median_ms) > 0.0 ? 1000.0 / (median_ms) : 0.0)
+
 static void emit_md(const Args* a, const char* active, const Stats* s) {
     printf("# FaceX NPU bench\n\n");
     if (a->label[0]) printf("**label:** %s  \n", a->label);
     printf("**backends compiled:** TFLite  \n");
     printf("**backends active:** %s  \n", active);
     printf("**model:** %s  \n\n", a->embed_path);
-    printf("| stage | iters | min ms | median ms | mean ms | p95 ms | p99 ms |\n");
-    printf("|---|--:|--:|--:|--:|--:|--:|\n");
-    printf("| embed | %d | %.3f | %.3f | %.3f | %.3f | %.3f |\n",
-           s->n, s->min, s->median, s->mean, s->p95, s->p99);
+    printf("| stage | iters | min ms | median ms | mean ms | p95 ms | p99 ms | throughput (inf/s) |\n");
+    printf("|---|--:|--:|--:|--:|--:|--:|--:|\n");
+    printf("| embed | %d | %.3f | %.3f | %.3f | %.3f | %.3f | %.1f |\n",
+           s->n, s->min, s->median, s->mean, s->p95, s->p99, THROUGHPUT(s->median));
     printf("\n");
 }
 
 static void emit_csv(const Args* a, const char* active, const Stats* s) {
-    printf("label,compiled,active,stage,iters,min_ms,median_ms,mean_ms,p95_ms,p99_ms,e2e_face\n");
-    printf("\"%s\",\"TFLite\",\"%s\",embed,%d,%.3f,%.3f,%.3f,%.3f,%.3f,\n",
+    printf("label,compiled,active,stage,iters,min_ms,median_ms,mean_ms,p95_ms,p99_ms,throughput_ips,e2e_face\n");
+    printf("\"%s\",\"TFLite\",\"%s\",embed,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.2f,\n",
            a->label, active,
-           s->n, s->min, s->median, s->mean, s->p95, s->p99);
+           s->n, s->min, s->median, s->mean, s->p95, s->p99, THROUGHPUT(s->median));
 }
 
 static void emit_json(const Args* a, const char* active, const Stats* s) {
@@ -161,8 +165,8 @@ static void emit_json(const Args* a, const char* active, const Stats* s) {
     printf("  \"backends_active\":   \"%s\",\n", active);
     printf("  \"model\": \"%s\",\n", a->embed_path);
     printf("  \"stages\": [\n");
-    printf("    { \"name\": \"embed\", \"iters\": %d, \"min_ms\": %.3f, \"median_ms\": %.3f, \"mean_ms\": %.3f, \"p95_ms\": %.3f, \"p99_ms\": %.3f }\n",
-           s->n, s->min, s->median, s->mean, s->p95, s->p99);
+    printf("    { \"name\": \"embed\", \"iters\": %d, \"min_ms\": %.3f, \"median_ms\": %.3f, \"mean_ms\": %.3f, \"p95_ms\": %.3f, \"p99_ms\": %.3f, \"throughput_ips\": %.2f }\n",
+           s->n, s->min, s->median, s->mean, s->p95, s->p99, THROUGHPUT(s->median));
     printf("  ]\n}\n");
 }
 

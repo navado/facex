@@ -62,7 +62,7 @@ fi
 # converted at the end).
 ROWS_FILE=$(mktemp -t facex_bench_rows.XXXX)
 trap 'rm -f "$ROWS_FILE"' EXIT
-echo "label,compiled,active,stage,iters,min_ms,median_ms,mean_ms,p95_ms,p99_ms,e2e_face" > "$ROWS_FILE"
+echo "label,compiled,active,stage,iters,min_ms,median_ms,mean_ms,p95_ms,p99_ms,throughput_ips,e2e_face" > "$ROWS_FILE"
 
 run_config() {
     local label="$1"; shift
@@ -111,13 +111,13 @@ case "$FMT" in
         echo "host: \`$UNAME_S / $UNAME_M\`  "
         echo "iters: $ITERS  warmup: $WARMUP  embed: \`$EMBED_W\`  detect: \`$DETECT_W\`"
         echo
-        echo "| label | active | stage | min ms | median ms | mean ms | p95 ms | p99 ms |"
-        echo "|---|---|---|--:|--:|--:|--:|--:|"
+        echo "| label | active | stage | min ms | median ms | mean ms | p95 ms | p99 ms | throughput inf/s |"
+        echo "|---|---|---|--:|--:|--:|--:|--:|--:|"
         awk -F',' 'NR>1 {
             gsub(/^"|"$/, "", $1);
             gsub(/^"|"$/, "", $3);
-            printf("| %s | %s | %s | %.3f | %.3f | %.3f | %.3f | %.3f |\n",
-                   $1, $3, $4, $6, $7, $8, $9, $10);
+            printf("| %s | %s | %s | %.3f | %.3f | %.3f | %.3f | %.3f | %.2f |\n",
+                   $1, $3, $4, $6, $7, $8, $9, $10, $11);
         }' "$ROWS_FILE"
         ;;
     *)

@@ -19,6 +19,7 @@ Each topic commit (Bench / Mac / i.MX / ESP32) appends its own rows.
 | Host | Hardware | Compiler |
 |---|---|---|
 | **mac-m2** | Apple M2, macOS 26 | Apple Clang 21 (Xcode 16+) |
+| **imx8mp** | CompuLab IOT-GATE-IMX8PLUS — i.MX8MP, 4× Cortex-A53, 3.5 GiB, Debian 12, kernel 6.6.3 | gcc 12.2.0 (native, on-device) |
 | upstream | (assumed) | (varied) |
 
 ## CPU library (`libfacex.a`)
@@ -28,7 +29,7 @@ Each topic commit (Bench / Mac / i.MX / ESP32) appends its own rows.
 | `make` — host arch (Apple Silicon arm64, NEON) | ✅ | ✅ `otool -L` shows libSystem only | ✅ `golden_test`: `||emb||²=0.076`, sim=1.000 | ✅ via `facex-bench`: ~4.6 ms/embed median, ~8.4 ms e2e | mac-m2 | Default Mac build (Bench foundation) |
 | `make` — host arch (x86-64 + AVX2) | 🧪 (upstream) | upstream | upstream `golden_test` | upstream | — | Pre-existing path, untouched |
 | `make` — host arch (x86-64 + AVX-512 + VNNI) | 🧪 (upstream) | upstream | upstream | upstream | — | Auto-detected via `-mavx512f -dM` probe |
-| `make` — Linux aarch64 (NEON) | 🧪 (Makefile path exists) | n/a | — | — | — | Same C as mac-m2; no Linux ARM box here |
+| `make` / `make imx8mp-cpu` — Linux aarch64 (NEON), i.MX 8M Plus A53 | ✅ | ✅ native `ldd` shows libc/libm/libpthread only | ✅ `golden_test`: NaN=0, self-sim=1.000, diff-sim=0.7864 (bit-identical to mac-m2) | ✅ `facex-bench`: embed median 58.9 ms, e2e (detect-only) 60.6 ms | imx8mp | Native on-device build; row-parallel MLP across 4 A53 cores. See `docs/bench/imx8mp_baseline.csv` |
 | WASM (Emscripten) | 🧪 (upstream) | upstream | upstream demo | upstream demo | — | `wasm/` artifacts pre-existed |
 
 ## Apple Silicon — beyond NEON
@@ -51,7 +52,7 @@ Each topic commit (Bench / Mac / i.MX / ESP32) appends its own rows.
 | `make imx-npu` — host TFLite + XNNPACK fallback | 🚫 (no libtensorflowlite_c on dev box) | ✅ `clang -fsyntax-only` against header stub | — | — | mac-m2 (syntax-only) | Real build needs TFLite C lib + headers |
 | `make imx93 SDK=…` — A55 + Ethos-U65 (Vela) | 🚫 (no NXP SDK here) | 🧪 same syntax check | — | — | — | Compile-time path verified; runtime needs `/dev/ethosu0` |
 | `make imx95 SDK=…` — A55 + Ethos-U65 | 🚫 (no NXP SDK here) | 🧪 same syntax check | — | — | — | Same artifact as imx93, different `-mtune` |
-| `make imx8mp SDK=…` — A53 + VIP9000 (VxDelegate) | 🚫 (no NXP SDK here) | 🧪 same syntax check | — | — | — | Delegate selected at runtime via `dlopen` |
+| `make imx8mp SDK=…` — A53 + VIP9000 (VxDelegate) | 🚫 (no NXP SDK here) | 🧪 same syntax check | — | 🚫 NPU userspace absent on Debian board | imx8mp (driver only) | `/dev/galcore` present on the CompuLab board, but `libvx_delegate.so`/`libtensorflow-lite`/Verisilicon OVX are NOT installed (Debian, not Yocto). NPU path is blocked until that stack is sourced — see `docs/plan/imx8mp_plan.md` |
 | `imx_npu_compile_test` — API smoke | ✅ syntax | ✅ | — | — | mac-m2 (syntax) | Runs once TFLite is on the host; checks NULL handling, dtype branches |
 | **NPU embedder path** | — | ✅ | — | 🚫 needs board | — | Fully wired (INT8 quantize/dequantize + L2 norm) |
 | **NPU detector path** | — | — | — | — | — | Returns `-ENOSYS` by design — use hybrid pipeline |

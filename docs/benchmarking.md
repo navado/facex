@@ -19,8 +19,11 @@ thing. This page explains which tool does what, and how to produce a
 The first three share a CSV schema so they can be combined:
 
 ```
-label,compiled,active,stage,iters,min_ms,median_ms,mean_ms,p95_ms,p99_ms,e2e_face
+label,compiled,active,stage,iters,min_ms,median_ms,mean_ms,p95_ms,p99_ms,throughput_ips,e2e_face
 ```
+
+`throughput_ips` is single-stream throughput in inferences/sec (`1000 / median_ms`) — the engine
+already uses the threadpool per inference, so this is the sustained one-stream rate.
 
 `tools/bench.c` is the right tool for "compare backends". `bench_camera_mac.swift`
 is the right tool for "what's the actual frame-to-result latency in a real
@@ -50,16 +53,16 @@ Sample output on Apple M2 (4 build flavours × 2 stages = 8 rows):
 host: `Darwin / arm64`
 iters: 50  warmup: 5  embed: `data/edgeface_xs_fp32.bin`  detect: `weights/yunet_fp32.bin`
 
-| label | active | stage | min ms | median ms | mean ms | p95 ms | p99 ms |
-|---|---|---|--:|--:|--:|--:|--:|
-| default              | NEON                  | embed | 4.394 | 4.528 | 4.546 | 4.836 | 5.034 |
-| default              | NEON                  | e2e   | 8.275 | 8.382 | 8.410 | 8.652 | 8.765 |
-| ACCELERATE=1         | Accelerate(AMX)+NEON  | embed | 3.303 | 3.616 | 3.651 | 4.036 | 4.125 |
-| ACCELERATE=1         | Accelerate(AMX)+NEON  | e2e   | 7.292 | 7.402 | 7.418 | 7.603 | 7.912 |
-| SME=1                | NEON                  | embed | 4.412 | 4.599 | 4.626 | 4.812 | 5.509 |
-| SME=1                | NEON                  | e2e   | 8.281 | 8.511 | 8.568 | 9.106 | 9.432 |
-| SME=1+ACCELERATE=1   | Accelerate(AMX)+NEON  | embed | 3.425 | 3.535 | 3.597 | 3.936 | 4.003 |
-| SME=1+ACCELERATE=1   | Accelerate(AMX)+NEON  | e2e   | 7.275 | 7.394 | 7.422 | 7.632 | 7.845 |
+| label | active | stage | min ms | median ms | mean ms | p95 ms | p99 ms | throughput inf/s |
+|---|---|---|--:|--:|--:|--:|--:|--:|
+| default              | NEON                  | embed | 4.394 | 4.528 | 4.546 | 4.836 | 5.034 | 220.9 |
+| default              | NEON                  | e2e   | 8.275 | 8.382 | 8.410 | 8.652 | 8.765 | 119.3 |
+| ACCELERATE=1         | Accelerate(AMX)+NEON  | embed | 3.303 | 3.616 | 3.651 | 4.036 | 4.125 | 276.5 |
+| ACCELERATE=1         | Accelerate(AMX)+NEON  | e2e   | 7.292 | 7.402 | 7.418 | 7.603 | 7.912 | 135.1 |
+| SME=1                | NEON                  | embed | 4.412 | 4.599 | 4.626 | 4.812 | 5.509 | 217.4 |
+| SME=1                | NEON                  | e2e   | 8.281 | 8.511 | 8.568 | 9.106 | 9.432 | 117.5 |
+| SME=1+ACCELERATE=1   | Accelerate(AMX)+NEON  | embed | 3.425 | 3.535 | 3.597 | 3.936 | 4.003 | 282.9 |
+| SME=1+ACCELERATE=1   | Accelerate(AMX)+NEON  | e2e   | 7.275 | 7.394 | 7.422 | 7.632 | 7.845 | 135.2 |
 ```
 
 The "active" column shows which backends actually dispatched at runtime

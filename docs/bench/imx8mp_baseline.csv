@@ -1,0 +1,23 @@
+# FaceX CPU baseline — i.MX 8M Plus (CompuLab IOT-GATE-IMX8PLUS)
+# Board:  i.MX8MP, 4× Cortex-A53 @ aarch64, 3.5 GiB LPDDR4, Debian 12 (bookworm), kernel 6.6.3
+# Build:  native `make` on-device, gcc 12.2.0, NEON FP32-packed path (FACEX_NO_INT8)
+# Model:  data/edgeface_xs_fp32.bin (EdgeFace-XS, 512-d)
+# Date:   2026-06-04 (latency), 2026-06-14 (throughput column added)
+# throughput_ips = single-stream inferences/sec = 1000/median_ms (engine uses all cores per inference).
+# Notes:  "-st" = before wiring the row-parallel MLP (single-core, _mlp_rows was dead code).
+#         "-mt" = current code (tp_parallel_for(_mlp_rows) across 4 cores). Bit-identical output.
+#         e2e is detect+align+embed on a synthetic frame with no face (e2e_face=0) → detector cost only.
+#         EdgeFace-XS on A53 is memory-bandwidth bound: ~3 cores busy yields only ~1.18x (Amdahl + shared LPDDR4).
+#         The NPU (VxDelegate/VIP9000) is the real win here — see docs/imx8mp_npu/README.md.
+label,compiled,active,stage,iters,min_ms,median_ms,mean_ms,p95_ms,p99_ms,throughput_ips,e2e_face
+"imx8mp-a53-cpu-st","NEON","NEON",embed,200,69.317,69.752,69.799,70.254,71.202,14.34,
+"imx8mp-a53-cpu-mt","NEON","NEON",embed,200,53.280,58.209,58.132,60.684,61.646,17.18,
+"imx8mp-a53-cpu-st","NEON","NEON",e2e,200,59.880,60.213,60.390,61.824,65.247,16.61,0
+"imx8mp-a53-cpu-mt","NEON","NEON",e2e,200,58.587,59.916,60.488,64.140,66.556,16.69,0
+# --- NPU (VxDelegate/VIP9000) via NXP eIQ LF6.6.3, NXP benchmark_model, validated 2026-06-14 ---
+# throughput_ips = 1000/mean_ms (single-stream). model,backend,mean_ms,throughput_ips,note
+# mobilenet_v1_1.0_224_quant,cpu-4t,42.2,23.7,
+# mobilenet_v1_1.0_224_quant,npu-vx,2.93,341.3,14.4x; NPU bring-up validation
+# edgeface_xs_int8,cpu-4t,145.3,6.9,
+# edgeface_xs_int8,npu-vx,25.8,38.8,5.6x; full delegation; INT8 PTQ accuracy WIP (cosine 0.29, needs QAT)
+# edgeface_xs_fp32,npu-vx,,,FP32 EVIS GEMM shader fails to verify on VIP9000 - INT8 is the NPU path

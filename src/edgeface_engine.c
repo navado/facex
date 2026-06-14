@@ -221,7 +221,7 @@ static void xca_dw_conv_nchw(const float* in_nchw, int C, int H, int W,
     }
 }
 
-static void xca_block(float* x_hwc, int H, int W, int C,
+void xca_block(float* x_hwc, int H, int W, int C,
                       const float* gamma_xca, const float* gamma,
                       /* DW conv for split heads */
                       int n_dw_splits, const int* dw_split_sizes,
@@ -461,7 +461,7 @@ static void conv2d_hwc_reorder_weights(float* w, int Cout, int Cin, int KK) {
     free(tmp);
 }
 
-static void conv2d_hwc(const float* in_hwc, int Cin, int H, int W,
+void conv2d_hwc(const float* in_hwc, int Cin, int H, int W,
                        const float* w, /* REORDERED to [Cin*KK, Cout] */
                        const float* b, int Cout, int K, int stride,
                        float* out_hwc) {
@@ -588,37 +588,75 @@ static void matmul_wpb(const float* A, float* C, const float* bias,
 /* ============ Threaded MLP worker (file scope for proper compilation) ============ */
 #include "threadpool.h"
 typedef struct {
-    float *x, *t1, *t2, *residual;
+    float *in, *out, *t1, *t2, *residual;
     const float *gamma, *mlp_b1, *mlp_b3;
     const PackedFP32 *fp0, *fp1, *fp2, *fp3;
     int C, rank, hidden;
 } MlpCtx;
 
+/* Computes the ConvNeXt MLP (LN'd input `in` → 4 matmuls → bias/gamma/residual)
+ * for rows [start, end). Each invocation touches only disjoint row slices of
+ * in/out/t1/t2, so it is safe to fan out across the threadpool. Uses matmul_wp
+ * (INT8-aware) to stay identical to the in-line path on x86. */
 static void _mlp_rows(void* ctx_, int start, int end) {
     MlpCtx* g = (MlpCtx*)ctx_;
     int rows = end - start;
     if (rows <= 0) return;
-    float* x_s = g->x + start * g->C;
-    float* t1_s = g->t1 + start * g->rank;
-    float* t2_s = g->t2 + start * g->hidden;
-    float* res_s = g->residual + start * g->C;
-    matmul_fp32_packed(x_s, g->fp0->data, t1_s, rows, g->fp0->K, g->fp0->N);
-    matmul_fp32_packed(t1_s, g->fp1->data, t2_s, rows, g->fp1->K, g->fp1->N);
+    int C = g->C, rank = g->rank, hidden = g->hidden;
+    float* in_s  = g->in  + (size_t)start * C;
+    float* out_s = g->out + (size_t)start * C;
+    float* t1_s  = g->t1  + (size_t)start * rank;
+    float* t2_s  = g->t2  + (size_t)start * hidden;
+    float* res_s = g->residual + (size_t)start * C;
+
+    matmul_wp(in_s, t1_s, rows, C,    rank,   g->fp0);
+    matmul_wp(t1_s, t2_s, rows, rank, hidden, g->fp1);
+    /* Bias + GELU */
     for (int r = 0; r < rows; r++) {
-        float* row = t2_s + r * g->hidden;
-        for (int h = 0; h < g->hidden; h++) row[h] += g->mlp_b1[h];
+        float* row = t2_s + (size_t)r * hidden;
+        int h = 0;
+#ifdef __AVX512F__
+        for (; h + 16 <= hidden; h += 16)
+            _mm512_storeu_ps(row+h, _mm512_add_ps(_mm512_loadu_ps(row+h), _mm512_loadu_ps(g->mlp_b1+h)));
+#elif defined(__AVX2__)
+        for (; h + 8 <= hidden; h += 8)
+            _mm256_storeu_ps(row+h, _mm256_add_ps(_mm256_loadu_ps(row+h), _mm256_loadu_ps(g->mlp_b1+h)));
+#endif
+        for (; h < hidden; h++) row[h] += g->mlp_b1[h];
     }
-    gelu_fp32(t2_s, rows * g->hidden);
-    matmul_fp32_packed(t2_s, g->fp2->data, t1_s, rows, g->fp2->K, g->fp2->N);
-    matmul_fp32_packed(t1_s, g->fp3->data, x_s, rows, g->fp3->K, g->fp3->N);
-    for (int r = 0; r < rows; r++)
-        for (int c = 0; c < g->C; c++)
-            x_s[r*g->C+c] = (x_s[r*g->C+c] + g->mlp_b3[c]) * g->gamma[c] + res_s[r*g->C+c];
+    gelu_fp32(t2_s, (size_t)rows * hidden);
+    matmul_wp(t2_s, t1_s, rows, hidden, rank, g->fp2);
+    matmul_wp(t1_s, in_s, rows, rank,   C,    g->fp3); /* → in_s (dw_out slice) */
+    /* Fused bias + gamma + residual → out_s */
+    for (int r = 0; r < rows; r++) {
+        float* dst = out_s + (size_t)r * C;
+        float* src = in_s  + (size_t)r * C;
+        float* rsd = res_s + (size_t)r * C;
+        int c = 0;
+#ifdef __AVX512F__
+        for (; c + 16 <= C; c += 16) {
+            __m512 v = _mm512_loadu_ps(src + c);
+            v = _mm512_add_ps(v, _mm512_loadu_ps(g->mlp_b3 + c));
+            v = _mm512_fmadd_ps(v, _mm512_loadu_ps(g->gamma + c), _mm512_loadu_ps(rsd + c));
+            _mm512_storeu_ps(dst + c, v);
+        }
+#endif
+#ifdef __AVX2__
+        for (; c + 8 <= C; c += 8) {
+            __m256 v = _mm256_loadu_ps(src + c);
+            v = _mm256_add_ps(v, _mm256_loadu_ps(g->mlp_b3 + c));
+            v = _mm256_fmadd_ps(v, _mm256_loadu_ps(g->gamma + c), _mm256_loadu_ps(rsd + c));
+            _mm256_storeu_ps(dst + c, v);
+        }
+#endif
+        for (; c < C; c++)
+            dst[c] = (src[c] + g->mlp_b3[c]) * g->gamma[c] + rsd[c];
+    }
 }
 
 /* ============ ConvNeXt Block (HWC in/out, NCHW for DW) ============ */
 /* x[HW,C] → LN → DW Conv → gamma*x → LN → MLP(4 MatMul) → +residual */
-static void convnext_block(float* x_hwc, int H, int W, int C,
+void convnext_block(float* x_hwc, int H, int W, int C,
                            const float* gamma,
                            const float* dw_w, const float* dw_b, int K,
                            const float* ln_w, const float* ln_b,
@@ -647,47 +685,20 @@ static void convnext_block(float* x_hwc, int H, int W, int C,
     layer_norm_fp32(dw_out, HW, C, ln_w, ln_b, 1e-6f, dw_out);
 
     {
-        /* Single-threaded MLP operating on dw_out */
-        matmul_wp(dw_out, t1, HW, C, rank, fp0);
-        matmul_wp(t1, t2, HW, rank, hidden, fp1);
-        /* Bias + GELU */
-        for (int hw = 0; hw < HW; hw++) {
-            float* row = t2 + hw * hidden;
-            int h = 0;
-#ifdef __AVX512F__
-            for (; h + 16 <= hidden; h += 16)
-                _mm512_storeu_ps(row+h, _mm512_add_ps(_mm512_loadu_ps(row+h), _mm512_loadu_ps(mlp_b1+h)));
-#elif defined(__AVX2__)
-            for (; h + 8 <= hidden; h += 8)
-                _mm256_storeu_ps(row+h, _mm256_add_ps(_mm256_loadu_ps(row+h), _mm256_loadu_ps(mlp_b1+h)));
-#endif
-            for (; h < hidden; h++) row[h] += mlp_b1[h];
-        }
-        gelu_fp32(t2, HW * hidden);
-        matmul_wp(t2, t1, HW, hidden, rank, fp2);
-        matmul_wp(t1, dw_out, HW, rank, C, fp3); /* → dw_out, not x_hwc */
-        /* Fused bias + gamma + residual with AVX-512 */
-        for (int hw = 0; hw < HW; hw++) {
-            int c = 0;
-#ifdef __AVX512F__
-            for (; c + 16 <= C; c += 16) {
-                __m512 v = _mm512_loadu_ps(dw_out + hw*C + c);
-                v = _mm512_add_ps(v, _mm512_loadu_ps(mlp_b3 + c));
-                v = _mm512_fmadd_ps(v, _mm512_loadu_ps(gamma + c), _mm512_loadu_ps(residual + hw*C + c));
-                _mm512_storeu_ps(x_hwc + hw*C + c, v);
-            }
-#endif
-#ifdef __AVX2__
-            for (; c + 8 <= C; c += 8) {
-                __m256 v = _mm256_loadu_ps(dw_out + hw*C + c);
-                v = _mm256_add_ps(v, _mm256_loadu_ps(mlp_b3 + c));
-                v = _mm256_fmadd_ps(v, _mm256_loadu_ps(gamma + c), _mm256_loadu_ps(residual + hw*C + c));
-                _mm256_storeu_ps(x_hwc + hw*C + c, v);
-            }
-#endif
-            for (; c < C; c++)
-                x_hwc[hw*C+c] = (dw_out[hw*C+c] + mlp_b3[c]) * gamma[c] + residual[hw*C+c];
-        }
+        /* MLP: LN'd dw_out → 4 matmuls → bias/gamma/residual → x_hwc.
+         * Fanned out over the threadpool by row when the feature map is large
+         * enough to amortize dispatch (idle workers otherwise — see _mlp_rows);
+         * single in-line call below the threshold or when threads==1. */
+        MlpCtx mctx = {
+            .in = dw_out, .out = x_hwc, .t1 = t1, .t2 = t2, .residual = residual,
+            .gamma = gamma, .mlp_b1 = mlp_b1, .mlp_b3 = mlp_b3,
+            .fp0 = fp0, .fp1 = fp1, .fp2 = fp2, .fp3 = fp3,
+            .C = C, .rank = rank, .hidden = hidden,
+        };
+        if (tp_num_threads() > 1 && HW >= 64)
+            tp_parallel_for(_mlp_rows, &mctx, HW, 32);
+        else
+            _mlp_rows(&mctx, 0, HW);
     }
 }
 

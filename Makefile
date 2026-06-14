@@ -111,7 +111,7 @@ SRCS = src/facex.c src/transformer_ops.c $(GEMM_SRC) $(THREADPOOL_SRC) $(SME_SRC
 .PHONY: all clean example lib cli encrypt test mac-test bench detect-lib \
         bench-camera bench-camera-debug bench-camera-profile \
         mac-sme mac-universal mac-universal-arm64 mac-universal-x86_64 \
-        imx-npu imx93 imx95 imx8mp
+        imx-npu imx93 imx95 imx8mp imx8mp-cpu
 
 all: lib cli detect-lib
 
@@ -361,6 +361,27 @@ imx8mp:
 	          -shared -o libfacex_npu.so src/backend_tflite.c \
 	          -ltensorflowlite_c -ldl -lm -lpthread'
 	@echo "Built libfacex_npu.so for i.MX 8M Plus"
+
+# i.MX 8M Plus — native CPU library build (no NPU, no SDK needed).
+#
+# The `imx8mp` target above cross-compiles the NPU lib and needs an NXP Yocto
+# SDK + the Verisilicon/VxDelegate userspace, which only ships in NXP Yocto
+# images. On a plain Debian/Ubuntu i.MX 8M Plus (e.g. CompuLab IOT-GATE-IMX8PLUS)
+# that stack is absent — but the CPU library builds and runs natively with the
+# on-board gcc. This target just documents the recommended A53 tuning; the
+# default `make` (generic arm64 NEON) also works on-device.
+#
+#   make imx8mp-cpu            # run ON the board (native gcc)
+#
+# Validated: CompuLab IOT-GATE-IMX8PLUS, Debian 12, kernel 6.6.3, gcc 12.2.0.
+# See docs/plan/imx8mp_plan.md and docs/bench/imx8mp_baseline.csv.
+imx8mp-cpu:
+	$(MAKE) ARCH=arm64 \
+	        CFLAGS="-O3 -funroll-loops -DFACEX_NO_INT8 -mcpu=cortex-a53" \
+	        GEMM_SRC=src/gemm_stub.c \
+	        THREADPOOL_SRC=src/threadpool_pthread.c \
+	        all bench
+	@echo "Built libfacex.a + facex-cli + facex-bench for i.MX 8M Plus (A53 NEON CPU)"
 
 # Compile-only smoke test for the NPU API surface (runs anywhere TFLite
 # headers/libs are installed; doesn't need an actual NPU device).
