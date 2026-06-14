@@ -4,6 +4,9 @@ There are several bench tools in this repo, each measuring a different
 thing. This page explains which tool does what, and how to produce a
 **single unified comparison table** across multiple build flavours.
 
+> **Cross-platform results (latency + throughput):** see [`bench/cumulative.md`](bench/cumulative.md)
+> — Apple M2, i.MX8MP A53 CPU, and i.MX8MP VIP9000 NPU in one table.
+
 ## What measures what
 
 | Tool | Measures | Input | Output schema |

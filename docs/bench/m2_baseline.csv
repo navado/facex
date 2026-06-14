@@ -1,0 +1,15 @@
+# FaceX baseline — Apple M2 (macOS), host build
+# Build:  scripts/bench_all.sh sweep, clang, NEON + opt-in Accelerate(AMX)/SME flavors
+# Model:  data/edgeface_xs_fp32.bin (EdgeFace-XS, 512-d); detect weights/yunet_fp32.bin
+# Date:   2026-06-14
+# throughput_ips = single-stream inferences/sec = 1000/median_ms. e2e has a face (e2e_face=1).
+# Note: SME build is inert on M2 (active backend stays NEON); needs M4+ for the SME path.
+label,compiled,active,stage,iters,min_ms,median_ms,mean_ms,p95_ms,p99_ms,throughput_ips,e2e_face
+"default","NEON","NEON",embed,300,3.783,4.045,4.170,5.025,6.370,247.22,
+"default","NEON","NEON",e2e,300,7.717,7.885,7.958,8.557,9.315,126.82,1
+"ACCELERATE=1","Accelerate+NEON","Accelerate(AMX)+NEON",embed,300,3.435,3.576,3.682,4.554,6.568,279.64,
+"ACCELERATE=1","Accelerate+NEON","Accelerate(AMX)+NEON",e2e,300,7.401,7.746,8.046,8.871,12.987,129.10,1
+"SME=1","SME+NEON","NEON",embed,300,3.820,3.905,3.924,4.062,4.244,256.08,
+"SME=1","SME+NEON","NEON",e2e,300,7.737,7.931,8.414,10.032,18.027,126.09,1
+"SME=1+ACCELERATE=1","Accelerate+SME+NEON","Accelerate(AMX)+NEON",embed,300,3.424,3.601,3.614,3.751,3.809,277.70,
+"SME=1+ACCELERATE=1","Accelerate+SME+NEON","Accelerate(AMX)+NEON",e2e,300,7.430,7.573,7.660,8.103,8.280,132.05,1
