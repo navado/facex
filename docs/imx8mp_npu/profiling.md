@@ -64,10 +64,43 @@ keep the NPU busy:
 This is the path to MobileNet-like utilization. It's a model change (retrain — e.g. an
 EdgeFace-Nano or a quant/NPU-friendly variant), so it's the largest effort but the real lever.
 
-### 3. Enable on-chip AXI SRAM — cut DDR streaming
-`AXI_SRAM` bandwidth is 0 → the NPU isn't using its on-chip SRAM. Reserve/assign the i.MX8MP
-NPU SRAM (galcore reserved-memory / driver config) so the delegate tiles weights/activations
-through SRAM instead of DDR, reducing the memory-stall share of those idle cycles.
+### 3. Enable on-chip AXI SRAM — cut DDR streaming (small win on this SoC)
+`AXI_SRAM_READ/WRITE_BANDWIDTH = 0` in the profile → the NPU stages nothing in an external
+on-chip SRAM scratchpad; all ~18 MB/inference of reads hit DDR.
+
+**Current state on this board** (`/sys/module/galcore/parameters/`): the SRAM pools are
+unconfigured — `sRAMSizes = 0,0,…`, `externalSize = 0,0`, `extSRAMSizes = 0`,
+`contiguousSize = 0xFFFFFFFF` (NPU memory comes from CMA/DDR). The only reserved on-chip SRAM is
+`ocram@900000` (448 KiB, `nomap non-reusable`) — already claimed (ATF/suspend), not given to the NPU.
+And **galcore is built into the kernel** (`CONFIG_MXC_GPU_VIV=y`), so params can't be set with
+`modprobe` — they must come from the kernel command line or device tree.
+
+**How to enable:**
+1. Reserve an on-chip SRAM range for the NPU in the device tree (`reserved-memory` node) and point
+   the VIP/`gpu3d` node at it (NXP-supported route).
+2. Or pass it to galcore on the kernel cmdline (quick test):
+   ```
+   galcore.extSRAMSizes=0x100000 galcore.extSRAMBases=<phys_addr_of_reserved_sram>
+   # optionally galcore.sRAMSizes=<bytes> for the VIP per-core SRAM
+   ```
+3. Rebuild kernel/DTB (galcore is builtin — see `docs/kernel-rebuild.md`), deploy, **reboot**.
+4. Verify: re-run with `VIV_VX_PROFILE=1` and confirm `AXI_SRAM_*_BANDWIDTH > 0` and that
+   `DDR_READ_BANDWIDTH` / idle cycles drop.
+
+**Expected effect — modest, likely single-digit %, for *this* model (not yet measured):**
+- The dominant cost here is **per-op dispatch/sync overhead** (97.6% idle across ~966 tiny ops),
+  which an SRAM scratchpad does **not** address — it only reduces the *memory-stall* slice of the
+  idle time. So the headroom from SRAM alone is bounded by that slice, not the whole 97.6%.
+- The i.MX8MP has **very little spare on-chip SRAM** (OCRAM is 448 KiB and already taken; there is
+  no large dedicated NPU AXI-SRAM like higher-end i.MX). A ~256 KiB–1 MiB tile can stage some
+  intermediate activations but can't hold the working set.
+- EdgeFace-XS's **intermediate tensors are small** (≤ 112×112×32 early, shrinking after), so they
+  largely fit in the VIP's internal SRAM already; the external-SRAM benefit is marginal. AXI-SRAM
+  pays off far more for conv-heavy models with **large** feature maps (e.g. MobileNet-class).
+- **Realistic estimate: ≈ 5–15% steady-state latency improvement at best on EdgeFace-XS, possibly
+  negligible.** It requires a reboot + kernel/DTB rebuild on a production board for a small, model-
+  dependent gain — so prioritize #1 (graph cache, validated 10.6× startup) and #2 (op-count
+  reduction, the real steady-state lever) first; treat AXI-SRAM as a measure-then-keep tweak.
 
 ### 4. QAT — prerequisite for *usable* INT8 (accuracy, not speed)
 Independent of the above: post-training INT8 gives cosine ~0.29 (broken). Quantization-aware
