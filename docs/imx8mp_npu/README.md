@@ -3,7 +3,8 @@
 Hardware-validated results, converted models, and reproduction steps for running FaceX
 on the **CompuLab IOT-GATE-IMX8PLUS** (i.MX 8M Plus, quad Cortex-A53, Debian 12).
 
-Full step-by-step: [`runbook.md`](runbook.md).
+Full step-by-step: [`runbook.md`](runbook.md). Performance analysis + optimizations:
+[`profiling.md`](profiling.md).
 
 ## Results (validated 2026-06-14)
 

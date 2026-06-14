@@ -21,3 +21,9 @@ label,compiled,active,stage,iters,min_ms,median_ms,mean_ms,p95_ms,p99_ms,through
 # edgeface_xs_int8,cpu-4t,145.3,6.9,
 # edgeface_xs_int8,npu-vx,25.8,38.8,5.6x; full delegation; INT8 PTQ accuracy WIP (cosine 0.29, needs QAT)
 # edgeface_xs_fp32,npu-vx,,,FP32 EVIS GEMM shader fails to verify on VIP9000 - INT8 is the NPU path
+# --- CPU core-scaling (embed, taskset -c, 2026-06-14): proves memory-bandwidth bound ---
+# Throughput plateaus at 2 cores -> shared LPDDR4 saturated; cores 3-4 stall. cores,median_ms,throughput_ips
+# 1,70.272,14.23
+# 2,59.441,16.82
+# 3,59.619,16.77
+# 4,58.206,17.18
